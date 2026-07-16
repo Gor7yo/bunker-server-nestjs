@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Тест Socket.io</title>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+  <h2>Тест подключения</h2>
+  <button onclick="createRoom()">Создать комнату</button>
+  <button onclick="joinRoom()">Подключиться к комнате</button>
+  <pre id="log"></pre>
+
+  <script>
+    const socket = io('http://localhost:3000/room', {
+      transports: ['websocket', 'polling']
+    });
+
+    const log = (msg) => {
+      document.getElementById('log').textContent += msg + '\n';
+    };
+
+    socket.on('connect', () => {
+      log('✅ Подключено! ID: ' + socket.id);
+    });
+
+    socket.on('connect_error', (err) => {
+      log('❌ Ошибка: ' + err.message);
+    });
+
+    socket.on('room:created', (data) => {
+      log('📦 Комната создана: ' + JSON.stringify(data, null, 2));
+    });
+
+    socket.on('room:joined', (data) => {
+      log('📦 Подключен к комнате: ' + JSON.stringify(data, null, 2));
+    });
+
+    socket.on('room:error', (data) => {
+      log('❌ Ошибка: ' + data.message);
+    });
+
+    socket.on('room:playerJoined', (data) => {
+      log('👤 Игрок подключился: ' + JSON.stringify(data, null, 2));
+    });
+
+    socket.on('player:readyUpdated', (data) => {
+      log('✅ Статус готовности: ' + JSON.stringify(data, null, 2));
+    });
+
+    socket.on('game:started', (data) => {
+      log('🎮 Игра началась! ' + JSON.stringify(data, null, 2));
+    });
+
+    function createRoom() {
+      socket.emit('room:create', { hostName: 'Алексей' });
+      log('📤 Отправлено: room:create');
+    }
+
+    function joinRoom() {
+      const code = prompt('Введите код комнаты:');
+      if (code) {
+        socket.emit('room:join', { roomCode: code, playerName: 'Игрок' });
+        log('📤 Отправлено: room:join');
+      }
+    }
+  </script>
+</body>
+</html>
