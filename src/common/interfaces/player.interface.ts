@@ -5,6 +5,6 @@ export interface IPlayer {
   name: string;
   isReady: boolean;
   isHost: boolean;
-  characters?: IPlayerCard; // позже добавим
+  characters?: IPlayerCard | null; // позже добавим
   isAlive: boolean; // для голосования
 }

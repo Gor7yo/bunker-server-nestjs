@@ -25,7 +25,7 @@ import { ExceptionsHandler } from '@nestjs/core/exceptions/exceptions-handler';
 })
 export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
-  server: Server;
+  server!: Server;
 
   private readonly logger = new Logger(RoomGateway.name);
 
@@ -156,7 +156,7 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     const room = this.roomService.getRoom(data.roomCode);
-    
+
     if (!room) {
       throw new NotFoundException('Не удалось найти комнату');
     }
@@ -177,7 +177,44 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   // Запуск игры (только для хоста)
   @SubscribeMessage('game:start')
-  handleGameStart(
+  async handleGameStart(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomCode: string },
+  ) {
+    // 1. Получаем комнату
+    let room = this.roomService.getRoom(data.roomCode);
+    if (!room) {
+      client.emit('room:error', { message: 'Комната не найдена' });
+      return;
+    }
+
+    const player = room.getPlayer(client.id);
+
+    if (!player || !player.isHost) {
+      client.emit('room:error', {
+        message: 'Только ведущий может запустить игру',
+      });
+      return;
+    }
+
+    try {
+      await this.roomService.startGame(data.roomCode, this.server);
+    } catch (error: any) {
+      client.emit('room:error', { message: error.message });
+    }
+
+    room = this.roomService.getRoom(data.roomCode);
+
+    if (!room) {
+      client.emit('room:error', { message: 'Комната не найдена' });
+      return;
+    }
+
+    this.logger.log(`Игра началась в комнате ${data.roomCode}`);
+  }
+
+  @SubscribeMessage('player:myCard')
+  handleMyCard(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomCode: string },
   ) {
@@ -188,27 +225,19 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     const player = room.getPlayer(client.id);
-    if (!player || !player.isHost) {
-      client.emit('room:error', {
-        message: 'Только ведущий может запустить игру',
-      });
+    if (!player) {
+      client.emit('room:error', { message: 'Игрок не найден' });
       return;
     }
 
-    if (!room.allReady()) {
-      client.emit('room:error', { message: 'Не все игроки готовы' });
+    if (!player.characters) {
+      client.emit('room:error', { message: 'Карта ещё не сгенерирована' });
       return;
     }
 
-    // Меняем состояние игры
-    room.gameState = 'GAME_RUNNING';
-
-    // Оповещаем всех
-    this.server.to(data.roomCode).emit('game:started', {
-      players: room.players,
-      gameState: room.gameState,
+    // Отправляем карту этому игроку
+    client.emit('player:cardReceived', {
+      character: player.characters,
     });
-
-    this.logger.log(`Игра началась в комнате ${data.roomCode}`);
   }
 }

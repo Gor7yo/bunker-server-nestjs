@@ -1,26 +1,37 @@
 import { IPlayer } from 'src/common/interfaces/player.interface';
-import { IPlayerCard, TakedCards } from 'src/modules/deck/data/characters';
+import { IPlayerCard, UsedCards } from 'src/modules/deck/data/characters';
+
+export type GameState = 'WAITING' | 'READY_CHECK' | 'GAME_RUNNING' | 'FINISHED';
 
 export class Room {
   code: string;
   players: IPlayer[] = [];
   maxPlayers: number = 12;
-  takedCards: TakedCards = {
-    age: [],
-    profession: [],
-    health: [],
-    fobia: [],
-    hobbie: [],
-    bandage: [],
-    action: [],
-    fact: [],
+  usedCards: {
+    age: Set<string>;
+    profession: Set<string>;
+    health: Set<string>;
+    fobia: Set<string>;
+    hobbie: Set<string>;
+    bandage: Set<string>;
+    action: Set<string>;
+    fact: Set<string>;
   };
-  gameState: 'WAITING' | 'READY_CHECK' | 'GAME_RUNNING' | 'FINISHED' =
-    'WAITING';
+  gameState: GameState = 'WAITING';
   createdAt: Date = new Date();
 
   constructor(code: string) {
     this.code = code;
+    this.usedCards = {
+      age: new Set(),
+      profession: new Set(),
+      health: new Set(),
+      fobia: new Set(),
+      hobbie: new Set(),
+      bandage: new Set(),
+      action: new Set(),
+      fact: new Set(),
+    };
   }
 
   addPlayer(player: IPlayer): boolean {
@@ -46,7 +57,7 @@ export class Room {
     }
   }
 
-  setTakedCards(playerId: string): TakedCards | undefined {
+  setUsedCards(playerId: string): UsedCards | undefined {
     const player = this.getPlayer(playerId);
     if (!player?.characters) return;
 
@@ -57,15 +68,19 @@ export class Room {
     for (const key of characterKeys) {
       const value = player.characters[key];
       if (value) {
-        this.takedCards[key].push(value);
+        this.usedCards[key].add(value);
       }
     }
 
-    return this.takedCards;
+    return this.usedCards;
   }
 
   allReady(): boolean {
-    return this.players.every((p) => p.isReady === true);
+    const notHostPlayers = this.players.filter((p) => !p.isHost);
+
+    if (notHostPlayers.length === 0) return false;
+
+    return notHostPlayers.every((p) => p.isReady === true);
   }
 
   getHost(): IPlayer | undefined {

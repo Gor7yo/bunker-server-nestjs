@@ -21,15 +21,15 @@ export type IPlayerCard = {
   fact: string | null;
 };
 
-export type TakedCards = {
-  age: string[];
-  profession: string[];
-  health: string[];
-  fobia: string[];
-  hobbie: string[];
-  bandage: string[];
-  action: string[];
-  fact: string[];
+export type UsedCards = {
+  age: Set<string>;
+  profession: Set<string>;
+  health: Set<string>;
+  fobia: Set<string>;
+  hobbie: Set<string>;
+  bandage: Set<string>;
+  action: Set<string>;
+  fact: Set<string>;
 };
 
 export const PROPERTY_CATEGORIES: IPropertyCategory[] = [
@@ -69,7 +69,7 @@ export const PROPERTY_CATEGORIES: IPropertyCategory[] = [
     ],
   },
   {
-    category: 'actions',
+    category: 'action',
     items: [
       {
         id: 27,
@@ -555,7 +555,7 @@ export const PROPERTY_CATEGORIES: IPropertyCategory[] = [
     ],
   },
   {
-    category: 'proffesion',
+    category: 'profession',
     items: [
       { id: 201, value: 'Медик Зоны' },
       { id: 202, value: 'Учёный-аномалист' },

@@ -1,10 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { IPlayerCard, PROPERTY_CATEGORIES } from './data/characters';
-import { RoomService } from '../room/room.service';
 
 @Injectable()
 export class DeckService {
-  constructor(private readonly roomService: RoomService) {}
+  constructor() {}
 
   generatePlayerCard(): IPlayerCard {
     return {
@@ -23,6 +22,8 @@ export class DeckService {
     const cat = PROPERTY_CATEGORIES.find((c) => c.category === category);
     if (!cat) return null;
     const randomIndex = Math.floor(Math.random() * cat.items.length);
-    return cat.items[randomIndex].value;
+    const randomVal = cat.items[randomIndex].value;
+
+    return randomVal;
   }
 }
