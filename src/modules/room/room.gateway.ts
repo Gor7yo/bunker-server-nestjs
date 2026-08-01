@@ -1,29 +1,21 @@
 import {
-  WebSocketGateway,
-  WebSocketServer,
-  SubscribeMessage,
-  OnGatewayConnection,
-  OnGatewayDisconnect,
   ConnectedSocket,
   MessageBody,
+  SubscribeMessage,
+  WebSocketGateway,
+  WebSocketServer,
 } from '@nestjs/websockets';
+import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
+
 import { RoomService } from './room.service';
-import {
-  BadRequestException,
-  ForbiddenException,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
-import { ExceptionsHandler } from '@nestjs/core/exceptions/exceptions-handler';
+import { IPlayer } from 'src/common/interfaces/player.interface';
 
 @WebSocketGateway({
-  cors: {
-    origin: '*', // в продакшене замени на свой фронтенд URL
-  },
-  namespace: 'room', // все события будут на /room
+  cors: { origin: '*' },
+  namespace: 'room',
 })
-export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class RoomGateway {
   @WebSocketServer()
   server!: Server;
 
@@ -31,213 +23,240 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   constructor(private readonly roomService: RoomService) {}
 
-  // Подключение клиента
-  handleConnection(client: Socket) {
-    this.logger.log(`Клиент подключен: ${client.id}`);
-  }
-
-  // Отключение клиента
-  handleDisconnect(client: Socket) {
-    this.logger.log(`Клиент отключен: ${client.id}`);
-
-    // Ищем комнату, где был этот игрок
-    const rooms = this.roomService.getAllRooms();
-    for (const room of rooms) {
-      const player = room.getPlayer(client.id);
-      if (player) {
-        const result = this.roomService.leaveRoom(room.code, client.id);
-        if (result.success) {
-          // Оповещаем всех в комнате
-          this.server.to(room.code).emit('player:left', {
-            playerId: client.id,
-            players: room.players,
-            newHost: result.newHost || null,
-          });
-
-          this.logger.log(`Игрок ${player.name} покинул комнату ${room.code}`);
-        }
-        break;
-      }
-    }
-  }
-
-  // Создание комнаты
   @SubscribeMessage('room:create')
-  handleCreateRoom(
+  async create(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { hostName: string },
   ) {
     try {
-      const { roomCode, host } = this.roomService.createRoom(data.hostName);
+      const room = await this.roomService.create(data.hostName, client.id);
 
-      // Сохраняем реальный socket.id
-      const room = this.roomService.getRoom(roomCode);
+      client.join(room.code);
 
-      if (!room) {
-        throw new ForbiddenException('Не удалось создать комнату');
-      }
-
-      const hostPlayer = room.getPlayer(host.id);
-      if (hostPlayer) {
-        hostPlayer.id = client.id;
-      }
-
-      // Подписываем клиента на комнату
-      client.join(roomCode);
-
-      // Отправляем ответ создателю
       client.emit('room:created', {
-        roomCode,
-        host: hostPlayer,
+        roomCode: room.code,
+        host: room.players[0],
       });
 
-      this.logger.log(`Комната ${roomCode} создана хостом ${data.hostName}`);
-    } catch (error: any) {
-      client.emit('room:error', { message: 'Ошибка создания комнаты' });
-      this.logger.error(error.message);
-    }
-  }
-
-  // Подключение к комнате
-  @SubscribeMessage('room:join')
-  handleJoinRoom(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomCode: string; playerName: string },
-  ) {
-    const result = this.roomService.joinRoom(
-      data.roomCode,
-      data.playerName,
-      client.id,
-    );
-
-    if (!result || !result.room) {
-      throw new BadRequestException('Не удалось зайти в комнату');
-    }
-
-    if (!result.success) {
-      client.emit('room:error', { message: result.error });
-      return;
-    }
-
-    // Подписываем клиента на комнату
-    client.join(data.roomCode);
-
-    // Отправляем подтверждение игроку
-    const player = result.room.getPlayer(client.id);
-    client.emit('room:joined', {
-      roomCode: data.roomCode,
-      player,
-      players: result.room.players,
-      maxPlayers: result.room.maxPlayers,
-    });
-
-    // Оповещаем всех в комнате о новом игроке
-    this.server.to(data.roomCode).emit('room:playerJoined', {
-      players: result.room.players,
-      joinedPlayer: player,
-    });
-
-    this.logger.log(
-      `Игрок ${data.playerName} подключился к комнате ${data.roomCode}`,
-    );
-  }
-
-  // Переключение готовности
-  @SubscribeMessage('player:ready')
-  handlePlayerReady(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomCode: string },
-  ) {
-    const result = this.roomService.toggleReady(data.roomCode, client.id);
-
-    if (!result.success) {
-      client.emit('room:error', { message: result.error });
-      return;
-    }
-
-    const room = this.roomService.getRoom(data.roomCode);
-
-    if (!room) {
-      throw new NotFoundException('Не удалось найти комнату');
-    }
-
-    // Оповещаем всех в комнате
-    this.server.to(data.roomCode).emit('player:readyUpdated', {
-      players: room.players,
-      allReady: result.allReady,
-    });
-
-    if (result.allReady) {
-      // Можно автоматически переключить состояние в READY_CHECK
-      this.server.to(data.roomCode).emit('game:allReady', {
-        message: 'Все игроки готовы! Ведущий, запускайте игру.',
-      });
-    }
-  }
-
-  // Запуск игры (только для хоста)
-  @SubscribeMessage('game:start')
-  async handleGameStart(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomCode: string },
-  ) {
-    // 1. Получаем комнату
-    let room = this.roomService.getRoom(data.roomCode);
-    if (!room) {
-      client.emit('room:error', { message: 'Комната не найдена' });
-      return;
-    }
-
-    const player = room.getPlayer(client.id);
-
-    if (!player || !player.isHost) {
+      this.logger.log(`Создана комната ${room.code}`);
+    } catch (e: any) {
       client.emit('room:error', {
-        message: 'Только ведущий может запустить игру',
+        message: e.message,
       });
-      return;
     }
+  }
 
+  @SubscribeMessage('room:join')
+  async join(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: {
+      roomCode: string;
+      player: IPlayer;
+    },
+  ) {
     try {
-      await this.roomService.startGame(data.roomCode, this.server);
-    } catch (error: any) {
-      client.emit('room:error', { message: error.message });
+      const room = await this.roomService.join(data, client);
+
+      client.join(data.roomCode);
+
+      client.emit('room:joined', {
+        roomCode: room.code,
+        player: room.players.find((p) => p.socketId === client.id),
+        players: room.players,
+        gameState: room.gameState,
+        maxPlayers: 12,
+      });
+
+      client.to(room.code).emit('room:playerJoined', {
+        players: room.players,
+      });
+
+      this.logger.log(`${data.player.name} вошёл в комнату`);
+    } catch (e: any) {
+      client.emit('room:error', {
+        message: e.message,
+      });
     }
+  }
 
-    room = this.roomService.getRoom(data.roomCode);
+  @SubscribeMessage('player:left')
+  async playerLeft(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { playerName: string; roomCode: string },
+  ) {
+    const result = await this.roomService.leave(data.playerName, data.roomCode);
 
-    if (!room) {
-      client.emit('room:error', { message: 'Комната не найдена' });
-      return;
+    this.server.to(data.roomCode).emit('players:update', {
+      players: result?.room.players,
+      count: result?.room.players.length,
+      leftPlayer: result?.playerName,
+    });
+  }
+
+  @SubscribeMessage('disconnect')
+  async handleDisconnect(@ConnectedSocket() client: Socket) {
+    const player = await this.roomService.findPlayer(client);
+
+    if (!player) return;
+
+    await this.roomService.playerLeft({
+      playerName: player.name,
+      roomCode: player.roomCode,
+    });
+  }
+
+  @SubscribeMessage('player:ready')
+  async ready(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: {
+      playerName: string;
+      roomCode: string;
+    },
+  ) {
+    try {
+      const result = await this.roomService.toggleReady(data, client);
+
+      this.server.to(data.roomCode).emit('room:playersUpdated', {
+        players: result.room.players,
+        allReady: result.allReady,
+      });
+    } catch (e: any) {
+      client.emit('room:error', {
+        message: e.message,
+      });
     }
+  }
 
-    this.logger.log(`Игра началась в комнате ${data.roomCode}`);
+  @SubscribeMessage('game:start')
+  async start(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: {
+      roomCode: string;
+    },
+  ) {
+    try {
+      const result = await this.roomService.gameStart(data.roomCode);
+
+      for (const player of result.players) {
+        if (!player.socketId) continue;
+
+        this.server.to(player.socketId).emit('player:cardReceived', {
+          character: player.character,
+        });
+      }
+
+      this.server.to(data.roomCode).emit('game:started', {
+        players: result.players.map((p) => ({
+          id: p.id,
+          name: p.name,
+          isAlive: p.isAlive,
+        })),
+      });
+
+      this.logger.log(`Игра началась в комнате ${data.roomCode}`);
+    } catch (e: any) {
+      client.emit('room:error', {
+        message: e.message,
+      });
+    }
   }
 
   @SubscribeMessage('player:myCard')
-  handleMyCard(
+  async myCard(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomCode: string },
+    @MessageBody() data: { roomCode: string; playerName: string },
   ) {
-    const room = this.roomService.getRoom(data.roomCode);
-    if (!room) {
-      client.emit('room:error', { message: 'Комната не найдена' });
-      return;
-    }
+    try {
+      const card = await this.roomService.getPlayerCard(
+        data.roomCode,
+        data.playerName,
+      );
 
-    const player = room.getPlayer(client.id);
-    if (!player) {
-      client.emit('room:error', { message: 'Игрок не найден' });
-      return;
+      client.emit('player:cardReceived', {
+        character: card,
+      });
+    } catch (e: any) {
+      client.emit('room:error', {
+        message: e.message,
+      });
     }
+  }
 
-    if (!player.characters) {
-      client.emit('room:error', { message: 'Карта ещё не сгенерирована' });
-      return;
+  @SubscribeMessage('room:reconnect')
+  async reconnect(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: {
+      roomCode: string;
+      playerName: string;
+    },
+  ) {
+    try {
+      const room = await this.roomService.reconnect(data, client);
+
+      client.join(room.code);
+
+      const me = room.players.find((p) => p.socketId === client.id);
+
+      client.emit('room:joined', {
+        roomCode: room.code,
+        player: me,
+        players: room.players,
+        gameState: room.gameState,
+        maxPlayers: 12,
+      });
+
+      if (me?.characters) {
+        client.emit('player:cardReceived', {
+          character: me.characters,
+        });
+      }
+
+      if (room.gameState === 'GAME_RUNNING') {
+        client.emit('game:started', {
+          players: room.players.map((p) => ({
+            id: p.id,
+            name: p.name,
+            isAlive: p.isAlive,
+          })),
+        });
+      }
+
+      client.to(room.code).emit('room:playerReconnected', {
+        player: me,
+      });
+    } catch (e: any) {
+      client.emit('room:error', {
+        message: e.message,
+      });
     }
+  }
 
-    // Отправляем карту этому игроку
-    client.emit('player:cardReceived', {
-      character: player.characters,
-    });
+  @SubscribeMessage('room:getState')
+  async getState(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: {
+      roomCode: string;
+    },
+  ) {
+    try {
+      const room = await this.roomService.find(data.roomCode);
+
+      client.emit('room:joined', {
+        roomCode: room.code,
+        player: room.players.find((p) => p.socketId === client.id),
+        players: room.players,
+        gameState: room.gameState,
+        maxPlayers: 12,
+      });
+    } catch (e: any) {
+      client.emit('room:error', {
+        message: e.message,
+      });
+    }
   }
 }

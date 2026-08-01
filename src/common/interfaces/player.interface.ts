@@ -1,10 +1,12 @@
-import { IPlayerCard } from "src/modules/deck/data/characters";
+import { IPlayerCard } from 'src/modules/deck/data/characters';
 
 export interface IPlayer {
-  id: string; // socket.id
+  id: string;
+  createdAt: Date;
   name: string;
   isReady: boolean;
   isHost: boolean;
-  characters?: IPlayerCard | null; // позже добавим
-  isAlive: boolean; // для голосования
+  isAlive: boolean;
+  characters?: IPlayerCard | null;
+  roomCode: string;
 }

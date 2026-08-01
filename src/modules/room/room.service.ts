@@ -1,293 +1,362 @@
 import {
-  BadRequestException,
-  ForbiddenException,
   Injectable,
-  InternalServerErrorException,
   NotFoundException,
+  BadRequestException,
+  Logger,
 } from '@nestjs/common';
-import { v4 as uuidv4 } from 'uuid';
-import { GameState, Room } from './entities/room.entity';
-import { IPlayer } from 'src/common/interfaces/player.interface';
+import { PrismaService } from '../../prisma/prisma.service';
 import { DeckService } from '../deck/deck.service';
-import { IPlayerCard, UsedCards } from '../deck/data/characters';
-import { Server } from 'socket.io';
+import { Server, Socket } from 'socket.io';
+import { IPlayer } from 'src/common/interfaces/player.interface';
+import { randomBytes } from 'crypto';
+
+interface CardSets {
+  age: Set<string>;
+  profession: Set<string>;
+  health: Set<string>;
+  fobia: Set<string>;
+  hobbie: Set<string>;
+  bandage: Set<string>;
+  action: Set<string>;
+  fact: Set<string>;
+}
 
 @Injectable()
 export class RoomService {
-  constructor(private readonly deckService: DeckService) {}
+  constructor(
+    private prisma: PrismaService,
+    private deck: DeckService,
+  ) {}
 
-  private rooms: Map<string, Room> = new Map();
+  private readonly logger = new Logger(RoomService.name);
 
-  // Генерация 6-значного кода комнаты
-  private generateRoomCode(): string {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let code = '';
-    for (let i = 0; i < 6; i++) {
-      code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return code;
-  }
+  async create(hostName: string, socketId: string) {
+    const code = await this.generateCode();
 
-  // Создание комнаты
-  createRoom(hostName: string): { roomCode: string; host: IPlayer } {
-    let roomCode = this.generateRoomCode();
-
-    // Убеждаемся, что код уникальный
-    while (this.rooms.has(roomCode)) {
-      roomCode = this.generateRoomCode();
-    }
-
-    const room = new Room(roomCode);
-
-    const host: IPlayer = {
-      id: uuidv4(), // временный ID, позже заменится на socket.id
-      name: hostName,
-      isReady: false,
-      isHost: true,
-      isAlive: true,
-    };
-
-    room.addPlayer(host);
-    this.rooms.set(roomCode, room);
-
-    return { roomCode, host };
-  }
-
-  // Подключение игрока
-  joinRoom(
-    roomCode: string,
-    playerName: string,
-    socketId: string,
-  ): { success: boolean; room: Room | null; error: string | null } {
-    const room = this.rooms.get(roomCode);
-    if (!room) {
-      return { success: false, room: null, error: 'Комната не найдена' };
-    }
-
-    if (room.gameState !== 'WAITING') {
-      return { success: false, room: null, error: 'Игра уже началась' };
-    }
-
-    if (room.players.length >= room.maxPlayers) {
-      return { success: false, room: null, error: 'Комната заполнена' };
-    }
-
-    // Проверяем, не заходит ли тот же игрок повторно
-    const existingPlayer = room.players.find((p) => p.id === socketId);
-    if (existingPlayer) {
-      return { success: true, room, error: null }; // уже в комнате
-    }
-
-    const newPlayer: IPlayer = {
-      id: socketId,
-      name: playerName,
-      isReady: false,
-      isHost: false,
-      isAlive: true,
-    };
-
-    room.addPlayer(newPlayer);
-    return { success: true, room, error: null };
-  }
-
-  // Выход из комнаты
-  leaveRoom(
-    roomCode: string,
-    socketId: string,
-  ): { success: boolean; newHost?: IPlayer; error?: string } {
-    const room = this.rooms.get(roomCode);
-    if (!room) {
-      return { success: false, error: 'Комната не найдена' };
-    }
-
-    const player = room.getPlayer(socketId);
-    if (!player) {
-      return { success: false, error: 'Игрок не найден' };
-    }
-
-    const wasHost = player.isHost;
-    room.removePlayer(socketId);
-
-    // Если комната пуста — удаляем
-    if (room.players.length === 0) {
-      this.rooms.delete(roomCode);
-      return { success: true };
-    }
-
-    // Если вышел хост — назначаем нового
-    if (wasHost) {
-      const newHost = room.players[0];
-      newHost.isHost = true;
-      return { success: true, newHost };
-    }
-
-    return { success: true };
-  }
-
-  async startGame(roomCode: string, server: Server) {
-    // 👈 добавили server
-    const room = this.getRoom(roomCode);
-    if (!room) throw new NotFoundException('Такой комнаты нет');
-
-    if (!room.allReady()) {
-      throw new BadRequestException('Не все игроки готовы');
-    }
-
-    let attempts = 0;
-    const maxAttempts = 50;
-    let success = false;
-
-    while (attempts < maxAttempts && !success) {
-      room.players.forEach((p) => (p.characters = null));
-      room.usedCards = this.resetUsedCards();
-      this.generatePlayersCard(roomCode);
-      success = this.checkAllCardsUnique(room);
-      attempts++;
-    }
-
-    if (!success) {
-      throw new InternalServerErrorException(
-        'Не удалось сгенерировать уникальные карты',
-      );
-    }
-
-    // 3. Меняем статус
-    this.updateGameState(roomCode, 'GAME_RUNNING');
-
-    // 4. Генерируем карты
-    this.generatePlayersCard(roomCode);
-
-    // Отправляем карты через server
-    for (const player of room.players) {
-      server.to(player.id).emit('player:cardReceived', {
-        character: player.characters,
-      });
-    }
-
-    server.to(roomCode).emit('game:started', {
-      // 👈 используем server
-      players: room.players.map((p) => ({
-        id: p.id,
-        name: p.name,
-        isAlive: p.isAlive,
-      })),
+    const room = await this.prisma.room.create({
+      data: {
+        code,
+        players: {
+          create: {
+            name: hostName,
+            socketId,
+            isHost: true,
+          },
+        },
+      },
+      include: {
+        players: true,
+      },
     });
-
-    return { success: true };
-  }
-
-  updateGameState(roomCode: string, state: GameState) {
-    const room = this.getRoom(roomCode);
-    if (room) room.gameState = state;
-  }
-
-  // Переключение готовности
-  toggleReady(
-    roomCode: string,
-    socketId: string,
-  ): { success: boolean; allReady?: boolean; error?: string } {
-    const room = this.rooms.get(roomCode);
-    if (!room) {
-      return { success: false, error: 'Комната не найдена' };
-    }
-
-    const player = room.getPlayer(socketId);
-    if (!player) {
-      return { success: false, error: 'Игрок не найден' };
-    }
-
-    if (player.isHost) {
-      return { success: false, error: 'Ведущий не может нажимать "Готов"' };
-    }
-
-    room.setReady(socketId);
-    const allReady = room.allReady();
-
-    return { success: true, allReady };
-  }
-
-  // Получение комнаты
-  getRoom(roomCode: string): Room | undefined {
-    const room = this.rooms.get(roomCode);
-
-    if (!room) {
-      throw new ForbiddenException('Не удалось создать комнату');
-    }
 
     return room;
   }
 
-  generatePlayersCard(roomCode: string) {
-    const room = this.rooms.get(roomCode);
-    if (!room) throw new NotFoundException('Такой комнаты нет');
+  async find(code: string) {
+    const room = await this.prisma.room.findUnique({
+      where: { code },
+      include: {
+        players: {
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+    });
 
-    room.usedCards = {
-      age: new Set(),
-      profession: new Set(),
-      health: new Set(),
-      fobia: new Set(),
-      hobbie: new Set(),
-      bandage: new Set(),
-      action: new Set(),
-      fact: new Set(),
+    if (!room) throw new NotFoundException('Комната не найдена');
+
+    return {
+      ...room
     };
+  }
 
-    for (const player of room.players) {
-      let card: IPlayerCard;
-      let attempts = 0;
-      const maxAttempts = 100;
+  async gameStart(roomCode: string) {
+    const room = await this.find(roomCode);
 
-      do {
-        card = this.deckService.generatePlayerCard();
-        attempts++;
-      } while (
-        attempts < maxAttempts &&
-        !this.isCardUnique(room.usedCards, card)
+    if (room.players.length < 2) {
+      throw new BadRequestException('Нужно минимум 2 игрока');
+    }
+
+    const allReady = room.players.every((p) => p.isReady);
+    if (!allReady) {
+      throw new BadRequestException('Не все игроки готовы');
+    }
+
+    const updatedRoom = await this.dealCards(roomCode);
+
+    return {
+      players: updatedRoom.players.map((player) => ({
+        socketId: player.socketId,
+        character: player.characters,
+        id: player.id,
+        name: player.name,
+        isAlive: player.isAlive,
+      })),
+    };
+  }
+
+  async join(data: { roomCode: string; player: IPlayer }, client: Socket) {
+    const room = await this.find(data.roomCode);
+
+    if (room.gameState !== 'WAITING') {
+      throw new BadRequestException('Игра уже началась');
+    }
+
+    if (room.players.length >= 12) {
+      throw new BadRequestException('Комната заполнена');
+    }
+
+    const exists = await this.prisma.player.findFirst({
+      where: {
+        name: data.player.name,
+        roomCode: data.roomCode,
+      },
+    });
+
+    if (exists) {
+      throw new BadRequestException('Такое имя уже занято');
+    }
+
+    const newPlayer = await this.prisma.player.create({
+      data: {
+        name: data.player.name,
+        socketId: client.id,
+        roomCode: room.code,
+        isOnline: true,
+      },
+    });
+
+    return this.find(room.code);
+  }
+
+  async leave(playerName: string, roomCode: string) {
+    const player = await this.prisma.player.findFirst({
+      where: { name: playerName, roomCode },
+      include: { room: true },
+    });
+
+    if (!player) return;
+
+    if (player.isHost) {
+      const room = await this.find(player.roomCode);
+      const newHost = room.players.find(
+        (p) => p.id !== player.id && p.isOnline,
       );
 
-      if (attempts >= maxAttempts) {
-        throw new Error('Не удалось сгенерировать уникальную карту');
+      if (newHost) {
+        await this.prisma.player.update({
+          where: { id: newHost.id },
+          data: { isHost: true },
+        });
       }
+    }
 
-      player.characters = card;
+    await this.prisma.player.delete({
+      where: { id: player.id },
+    });
 
-      room.setUsedCards(player.id);
+    const updatedRoom = await this.find(roomCode);
+
+    return {
+      room: updatedRoom,
+      playerName: player.name,
+    };
+  }
+
+  async removePlayer(playerId: string) {
+    const player = await this.prisma.player.findUnique({
+      where: { id: playerId },
+    });
+
+    if (!player) throw new NotFoundException('Игрок не найден');
+
+    if (player.isHost) {
+      const newHost = await this.prisma.player.findFirst({
+        where: {
+          roomCode: player.roomCode,
+          id: { not: playerId },
+          isOnline: true,
+        },
+      });
+
+      if (newHost) {
+        await this.prisma.player.update({
+          where: { id: newHost.id },
+          data: { isHost: true },
+        });
+      }
+    }
+
+    await this.prisma.player.delete({
+      where: { id: playerId },
+    });
+  }
+
+  async reconnect(
+    data: { roomCode: string; playerName: string },
+    client: Socket,
+  ) {
+    const room = await this.find(data.roomCode);
+
+    const player = room.players.find(
+      (p) => p.name === data.playerName && !p.isOnline,
+    );
+
+    if (!player) throw new NotFoundException('Игрок не найден');
+
+    await this.prisma.player.update({
+      where: {
+        id: player.id,
+      },
+      data: {
+        socketId: client.id,
+        isOnline: true,
+      },
+    });
+
+    return this.find(room.code);
+  }
+
+  async getPlayerCard(roomCode: string, playerName: string) {
+    const room = await this.find(roomCode);
+
+    const player = room.players.find((p) => p.name === playerName);
+
+    if (!player) {
+      throw new NotFoundException('Игрок не найден');
+    }
+
+    if (!player.characters) {
+      throw new BadRequestException('Карта еще не выдана');
+    }
+
+    return player.characters;
+  }
+
+  async toggleReady(
+    data: { playerName: string; roomCode: string },
+    client: Socket,
+  ) {
+    const player = await this.prisma.player.findFirst({
+      where: {
+        name: data.playerName,
+        roomCode: data.roomCode,
+      },
+    });
+
+    if (!player) {
+      throw new NotFoundException('Игрок не найден');
+    }
+
+    if (player.socketId !== client.id) {
+      await this.prisma.player.update({
+        where: { id: player.id },
+        data: { socketId: client.id },
+      });
+    }
+
+    const updatedPlayer = await this.prisma.player.update({
+      where: { id: player.id },
+      data: { isReady: !player.isReady },
+    });
+
+    const room = await this.find(data.roomCode);
+    const allReady = room.players.every((p) => p.isReady);
+
+    return { room, allReady };
+  }
+
+  async updateSocketId(oldId: string, newId: string) {
+    await this.prisma.player.update({
+      where: { socketId: oldId },
+      data: { socketId: newId },
+    });
+  }
+
+  async playerLeft(data: { playerName: string; roomCode: string }) {
+    const player = await this.prisma.player.findFirst({
+      where: {
+        name: data.playerName,
+        roomCode: data.roomCode,
+      },
+    });
+
+    if (!player || !player.socketId) {
+      throw new NotFoundException('Игрок не найден');
+    }
+
+    const result = await this.leave(player.name, player.roomCode);
+
+    return result;
+  }
+
+  async findPlayer(client: Socket) {
+    return this.prisma.player.findFirst({
+      where: { socketId: client.id },
+    });
+  }
+
+  async dealCards(roomCode: string) {
+    const room = await this.find(roomCode);
+
+    const used = this.createUsedSet();
+
+    const playerIds = room.players.map((player) => player.id);
+
+    await this.prisma.$transaction(
+      playerIds.map((playerId) => {
+        const card = this.generateUniqueCard(used);
+
+        return this.prisma.player.update({
+          where: {
+            id: playerId,
+          },
+          data: {
+            characters: card,
+          },
+        });
+      }),
+    );
+
+    await this.prisma.room.update({
+      where: {
+        code: roomCode,
+      },
+      data: {
+        gameState: 'GAME_RUNNING',
+      },
+    });
+
+    return await this.find(roomCode);
+  }
+
+  private async generateCode(): Promise<string> {
+    while (true) {
+      const code = randomBytes(3).toString('hex').toUpperCase();
+
+      const exists = await this.prisma.room.findUnique({
+        where: {
+          code,
+        },
+      });
+
+      if (!exists) return code;
     }
   }
 
-  getAllRooms(): Room[] {
-    return Array.from(this.rooms.values());
+  async getGameState(roomCode: string) {
+    const room = await this.find(roomCode);
+
+    return {
+      gameState: room.gameState,
+      playersCount: room.players.length,
+      onlineCount: room.players.filter((p) => p.isOnline).length,
+      readyCount: room.players.filter((p) => p.isReady).length,
+      canStart:
+        room.players.length >= 2 && room.players.every((p) => p.isReady),
+    };
   }
 
-  roomExists(roomCode: string): boolean {
-    return this.rooms.has(roomCode);
-  }
-
-  private isCardUnique(usedCards: any, card: IPlayerCard): boolean {
-    return !(
-      usedCards.age.has(card.age) ||
-      usedCards.profession.has(card.profession) ||
-      usedCards.health.has(card.health) ||
-      usedCards.fobia.has(card.fobia) ||
-      usedCards.hobbie.has(card.hobbie) ||
-      usedCards.bandage.has(card.bandage) ||
-      usedCards.action.has(card.action) ||
-      usedCards.fact.has(card.fact)
-    );
-  }
-
-  private addToUsedCards(usedCards: any, card: IPlayerCard) {
-    usedCards.age.add(card.age);
-    usedCards.profession.add(card.profession);
-    usedCards.health.add(card.health);
-    usedCards.fobia.add(card.fobia);
-    usedCards.hobbie.add(card.hobbie);
-    usedCards.bandage.add(card.bandage);
-    usedCards.action.add(card.action);
-    usedCards.fact.add(card.fact);
-  }
-
-  private resetUsedCards(): UsedCards {
+  private createUsedSet(): CardSets {
     return {
       age: new Set(),
       profession: new Set(),
@@ -300,8 +369,19 @@ export class RoomService {
     };
   }
 
-  private checkAllCardsUnique(room: Room): boolean {
-    const categories = [
+  private generateUniqueCard(used: any) {
+    for (let i = 0; i < 100; i++) {
+      const card = this.deck.generatePlayerCard();
+      if (this.isUnique(used, card)) {
+        this.addToUsed(used, card);
+        return card;
+      }
+    }
+    throw new Error('Не удалось сгенерировать уникальную карту');
+  }
+
+  private isUnique(used: any, card: any): boolean {
+    const fields = [
       'age',
       'profession',
       'health',
@@ -311,17 +391,20 @@ export class RoomService {
       'action',
       'fact',
     ];
+    return fields.every((f) => !used[f].has(card[f]));
+  }
 
-    for (const category of categories) {
-      const values = room.players
-        .map((p) => p.characters?.[category])
-        .filter((v) => v !== null && v !== undefined);
-
-      const unique = new Set(values);
-      if (unique.size !== values.length) {
-        return false;
-      }
-    }
-    return true;
+  private addToUsed(used: any, card: any) {
+    const fields = [
+      'age',
+      'profession',
+      'health',
+      'fobia',
+      'hobbie',
+      'bandage',
+      'action',
+      'fact',
+    ];
+    fields.forEach((f) => used[f].add(card[f]));
   }
 }
