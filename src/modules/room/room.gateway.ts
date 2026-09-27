@@ -1,6 +1,7 @@
 import {
   ConnectedSocket,
   MessageBody,
+  OnGatewayDisconnect,
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
@@ -15,13 +16,33 @@ import { IPlayer } from 'src/common/interfaces/player.interface';
   cors: { origin: '*' },
   namespace: 'room',
 })
-export class RoomGateway {
+export class RoomGateway implements OnGatewayDisconnect {
   @WebSocketServer()
   server!: Server;
 
   private readonly logger = new Logger(RoomGateway.name);
 
   constructor(private readonly roomService: RoomService) {}
+
+  async handleDisconnect(client: Socket) {
+    console.log('🔴 Socket disconnected:', client.id);
+
+    const player = await this.roomService.findPlayer(client);
+
+    if (!player) return;
+
+    try {
+      const result = await this.roomService.leave(player.name, player.roomCode);
+
+      this.server.to(player.roomCode).emit('players:left', {
+        players: result?.room.players ?? [],
+      });
+
+      this.logger.log(`${player.name} отключился`);
+    } catch (e) {
+      this.logger.error(e);
+    }
+  }
 
   @SubscribeMessage('room:create')
   async create(
@@ -72,56 +93,11 @@ export class RoomGateway {
         players: room.players,
       });
 
+      this.server.emit('room:playerJoined', {
+        players: room.players,
+      });
+
       this.logger.log(`${data.player.name} вошёл в комнату`);
-    } catch (e: any) {
-      client.emit('room:error', {
-        message: e.message,
-      });
-    }
-  }
-
-  @SubscribeMessage('player:left')
-  async playerLeft(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { playerName: string; roomCode: string },
-  ) {
-    const result = await this.roomService.leave(data.playerName, data.roomCode);
-
-    this.server.to(data.roomCode).emit('players:update', {
-      players: result?.room.players,
-      count: result?.room.players.length,
-      leftPlayer: result?.playerName,
-    });
-  }
-
-  @SubscribeMessage('disconnect')
-  async handleDisconnect(@ConnectedSocket() client: Socket) {
-    const player = await this.roomService.findPlayer(client);
-
-    if (!player) return;
-
-    await this.roomService.playerLeft({
-      playerName: player.name,
-      roomCode: player.roomCode,
-    });
-  }
-
-  @SubscribeMessage('player:ready')
-  async ready(
-    @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      playerName: string;
-      roomCode: string;
-    },
-  ) {
-    try {
-      const result = await this.roomService.toggleReady(data, client);
-
-      this.server.to(data.roomCode).emit('room:playersUpdated', {
-        players: result.room.players,
-        allReady: result.allReady,
-      });
     } catch (e: any) {
       client.emit('room:error', {
         message: e.message,
@@ -164,27 +140,6 @@ export class RoomGateway {
     }
   }
 
-  @SubscribeMessage('player:myCard')
-  async myCard(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomCode: string; playerName: string },
-  ) {
-    try {
-      const card = await this.roomService.getPlayerCard(
-        data.roomCode,
-        data.playerName,
-      );
-
-      client.emit('player:cardReceived', {
-        character: card,
-      });
-    } catch (e: any) {
-      client.emit('room:error', {
-        message: e.message,
-      });
-    }
-  }
-
   @SubscribeMessage('room:reconnect')
   async reconnect(
     @ConnectedSocket() client: Socket,
@@ -199,7 +154,7 @@ export class RoomGateway {
 
       client.join(room.code);
 
-      const me = room.players.find((p) => p.socketId === client.id);
+      const me = room.players.find((p) => p.name === data.playerName);
 
       client.emit('room:joined', {
         roomCode: room.code,
@@ -229,7 +184,7 @@ export class RoomGateway {
         player: me,
       });
     } catch (e: any) {
-      client.emit('room:error', {
+      client.emit('room:reconnectError', {
         message: e.message,
       });
     }
@@ -253,6 +208,103 @@ export class RoomGateway {
         gameState: room.gameState,
         maxPlayers: 12,
       });
+    } catch (e: any) {
+      client.emit('room:error', {
+        message: e.message,
+      });
+    }
+  }
+
+  @SubscribeMessage('player:ready')
+  async ready(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: {
+      playerName: string;
+      roomCode: string;
+    },
+  ) {
+    try {
+      const result = await this.roomService.toggleReady(data, client);
+
+      this.server.to(data.roomCode).emit('room:playersUpdated', {
+        players: result.room.players,
+        allReady: result.allReady,
+      });
+    } catch (e: any) {
+      client.emit('room:error', {
+        message: e.message,
+      });
+    }
+  }
+
+  @SubscribeMessage('player:myCard')
+  async myCard(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomCode: string; playerName: string },
+  ) {
+    try {
+      const card = await this.roomService.getPlayerCard(
+        data.roomCode,
+        data.playerName,
+      );
+
+      client.emit('player:cardReceived', {
+        character: card,
+      });
+    } catch (e: any) {
+      client.emit('room:error', {
+        message: e.message,
+      });
+    }
+  }
+
+  @SubscribeMessage('host:getCard')
+  async getCard(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomCode: string; playerName: string },
+  ) {
+    try {
+      const room = await this.roomService.find(data.roomCode);
+      const currentPlayer = room.players.find(
+        (p) => p.name === data.playerName,
+      );
+
+      if (!currentPlayer) throw new Error('Игрок не найден');
+
+      client.emit('host:getCardUp', {
+        playerName: currentPlayer.name,
+        card: currentPlayer.characters,
+      });
+    } catch (e: any) {
+      client.emit('room:error', {
+        message: `Не удалось получить карту: ${e.message}`,
+      });
+    }
+  }
+
+  @SubscribeMessage('player:left')
+  async leave(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: {
+      playerName: string;
+      roomCode: string;
+    },
+  ) {
+    try {
+      console.log(data);
+      const result = await this.roomService.playerLeft(data);
+
+      client.leave(data.roomCode);
+
+      this.server.to(data.roomCode).emit('players:left', {
+        players: result?.room.players ?? [],
+      });
+
+      client.emit('room:left');
+
+      this.logger.log(`${data.playerName} вышел из комнаты`);
     } catch (e: any) {
       client.emit('room:error', {
         message: e.message,

@@ -65,7 +65,7 @@ export class RoomService {
     if (!room) throw new NotFoundException('Комната не найдена');
 
     return {
-      ...room
+      ...room,
     };
   }
 
@@ -130,17 +130,25 @@ export class RoomService {
 
   async leave(playerName: string, roomCode: string) {
     const player = await this.prisma.player.findFirst({
-      where: { name: playerName, roomCode },
-      include: { room: true },
+      where: {
+        name: playerName,
+        roomCode,
+      },
     });
 
     if (!player) return;
 
     if (player.isHost) {
-      const room = await this.find(player.roomCode);
-      const newHost = room.players.find(
-        (p) => p.id !== player.id && p.isOnline,
-      );
+      const newHost = await this.prisma.player.findFirst({
+        where: {
+          roomCode,
+          id: { not: player.id },
+          isOnline: true,
+        },
+        orderBy: {
+          createdAt: 'asc',
+        },
+      });
 
       if (newHost) {
         await this.prisma.player.update({
@@ -150,8 +158,11 @@ export class RoomService {
       }
     }
 
-    await this.prisma.player.delete({
+    await this.prisma.player.update({
       where: { id: player.id },
+      data: {
+        isOnline: false,
+      },
     });
 
     const updatedRoom = await this.find(roomCode);
@@ -289,7 +300,7 @@ export class RoomService {
     return result;
   }
 
-  async findPlayer(client: Socket) {
+  async findPlayer(client: any) {
     return this.prisma.player.findFirst({
       where: { socketId: client.id },
     });
