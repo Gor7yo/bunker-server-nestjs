@@ -1,0 +1,11 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "buildCommand": "pnpm build"
+  },
+  "deploy": {
+    "startCommand": "pnpm prisma migrate deploy && pnpm start:prod",
+    "healthcheckPath": "/rooms",
+    "restartPolicyType": "ON_FAILURE"
+  }
+}
