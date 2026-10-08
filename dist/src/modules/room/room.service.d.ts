@@ -1,243 +1,151 @@
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import { DeckService } from '../deck/deck.service';
-import { Socket } from 'socket.io';
+import { PresenceService } from './presence.service';
+import { PublicRoomSummary } from './room.types';
+import { RoomFilters } from './room.filters';
+import { RoomWithPlayers } from './room.view';
+export declare const normalizeName: (raw: unknown) => string;
+export declare const normalizeCode: (raw: unknown) => string;
 export declare class RoomService {
-    private prisma;
-    private deck;
-    constructor(prisma: PrismaService, deck: DeckService);
-    private readonly logger;
-    create(hostName: string, socketId: string): Promise<{
-        players: {
+    private readonly prisma;
+    private readonly presence;
+    constructor(prisma: PrismaService, presence: PresenceService);
+    findByCode(code: string): Promise<RoomWithPlayers>;
+    findByToken(token: unknown): Promise<{
+        room: {
             id: string;
+            code: string;
+            status: import("@prisma/client").$Enums.RoomStatus;
+            title: string;
+            isPublic: boolean;
+            mode: import("@prisma/client").$Enums.GameMode;
+            maxPlayers: number;
+            settings: Prisma.JsonValue;
+            game: Prisma.JsonValue | null;
             createdAt: Date;
-            socketId: string | null;
-            name: string;
-            isHost: boolean;
-            isReady: boolean;
-            isAlive: boolean;
-            isOnline: boolean;
-            characters: import("@prisma/client/runtime/library").JsonValue | null;
-            roomCode: string;
-        }[];
+            updatedAt: Date;
+        };
     } & {
+        name: string;
         id: string;
-        code: string;
-        gameState: string;
-        createdAt: Date;
+        token: string;
+        roomId: string;
+        isHost: boolean;
+        role: import("@prisma/client").$Enums.PlayerRole;
+        isReady: boolean;
+        isAlive: boolean;
+        hasLeft: boolean;
+        card: Prisma.JsonValue | null;
+        revealed: string[];
+        joinedAt: Date;
     }>;
-    find(code: string): Promise<{
-        code: string;
-        gameState: string;
-        players: {
-            id: string;
-            socketId: string | null;
-            name: string;
-            isHost: boolean;
-            isReady: boolean;
-            isAlive: boolean;
-            isOnline: boolean;
-            characters: import("@prisma/client/runtime/library").JsonValue;
-        }[];
+    listPublic(filters: RoomFilters): Promise<{
+        rooms: PublicRoomSummary[];
+        total: number;
     }>;
-    gameStart(roomCode: string): Promise<{
-        players: {
-            socketId: string | null;
-            character: import("@prisma/client/runtime/library").JsonValue;
-            name: string;
-            isAlive: boolean;
-        }[];
-    }>;
-    join(data: {
-        roomCode: string;
-        playerName: string;
-    }, clientId: string): Promise<{
-        code: string;
-        gameState: string;
-        players: {
-            id: string;
-            socketId: string | null;
-            name: string;
-            isHost: boolean;
-            isReady: boolean;
-            isAlive: boolean;
-            isOnline: boolean;
-            characters: import("@prisma/client/runtime/library").JsonValue;
-        }[];
-    }>;
-    kick(data: {
-        roomCode: string;
-        playerName: string;
-    }): Promise<{
-        kickedPlayer: {
-            id: string;
-            createdAt: Date;
-            socketId: string | null;
-            name: string;
-            isHost: boolean;
-            isReady: boolean;
-            isAlive: boolean;
-            isOnline: boolean;
-            characters: import("@prisma/client/runtime/library").JsonValue | null;
-            roomCode: string;
-        };
-        room: {
-            code: string;
-            gameState: string;
-            players: {
-                id: string;
-                socketId: string | null;
-                name: string;
-                isHost: boolean;
-                isReady: boolean;
-                isAlive: boolean;
-                isOnline: boolean;
-                characters: import("@prisma/client/runtime/library").JsonValue;
-            }[];
-        };
-    }>;
-    leave(playerName: string, roomCode: string): Promise<{
-        room: {
-            code: string;
-            gameState: string;
-            players: {
-                id: string;
-                socketId: string | null;
-                name: string;
-                isHost: boolean;
-                isReady: boolean;
-                isAlive: boolean;
-                isOnline: boolean;
-                characters: import("@prisma/client/runtime/library").JsonValue;
-            }[];
-        };
-        playerName: string;
-    } | undefined>;
-    setOffline(playerName: string, roomCode: string, clientId: string): Promise<({
+    deleteAbandoned(): Promise<number>;
+    create(rawName: unknown, settingsPatch: unknown): Promise<{
         room: {
             players: {
-                id: string;
-                createdAt: Date;
-                socketId: string | null;
                 name: string;
+                id: string;
+                token: string;
+                roomId: string;
                 isHost: boolean;
+                role: import("@prisma/client").$Enums.PlayerRole;
                 isReady: boolean;
                 isAlive: boolean;
-                isOnline: boolean;
-                characters: import("@prisma/client/runtime/library").JsonValue | null;
-                roomCode: string;
+                hasLeft: boolean;
+                card: Prisma.JsonValue | null;
+                revealed: string[];
+                joinedAt: Date;
             }[];
         } & {
             id: string;
             code: string;
-            gameState: string;
+            status: import("@prisma/client").$Enums.RoomStatus;
+            title: string;
+            isPublic: boolean;
+            mode: import("@prisma/client").$Enums.GameMode;
+            maxPlayers: number;
+            settings: Prisma.JsonValue;
+            game: Prisma.JsonValue | null;
             createdAt: Date;
+            updatedAt: Date;
         };
-    } & {
-        id: string;
-        createdAt: Date;
-        socketId: string | null;
-        name: string;
-        isHost: boolean;
-        isReady: boolean;
-        isAlive: boolean;
-        isOnline: boolean;
-        characters: import("@prisma/client/runtime/library").JsonValue | null;
-        roomCode: string;
-    }) | null>;
-    removePlayer(playerId: string): Promise<void>;
-    reconnect(data: {
-        roomCode: string;
-        playerName: string;
-    }, client: Socket): Promise<{
-        code: string;
-        gameState: string;
-        players: {
+        player: {
+            name: string;
             id: string;
-            socketId: string | null;
-            name: string;
+            token: string;
+            roomId: string;
             isHost: boolean;
+            role: import("@prisma/client").$Enums.PlayerRole;
             isReady: boolean;
             isAlive: boolean;
-            isOnline: boolean;
-            characters: import("@prisma/client/runtime/library").JsonValue;
-        }[];
+            hasLeft: boolean;
+            card: Prisma.JsonValue | null;
+            revealed: string[];
+            joinedAt: Date;
+        };
     }>;
-    getPlayerCard(roomCode: string, playerName: string): Promise<string | number | true | import("@prisma/client/runtime/library").JsonObject | import("@prisma/client/runtime/library").JsonArray>;
-    toggleReady(data: {
-        playerName: string;
-        roomCode: string;
-    }, client: Socket): Promise<{
-        players: {
+    join(code: string, rawName: unknown): Promise<{
+        room: RoomWithPlayers;
+        player: {
             name: string;
-            isHost: boolean;
-            isReady: boolean;
-            characters: import("@prisma/client/runtime/library").JsonValue;
-            isAlive: boolean;
-            isOnline: boolean;
-        }[];
-        allReady: boolean;
-    }>;
-    updateSocketId(oldId: string, newId: string): Promise<void>;
-    findPlayer(client: any): Promise<{
-        id: string;
-        createdAt: Date;
-        socketId: string | null;
-        name: string;
-        isHost: boolean;
-        isReady: boolean;
-        isAlive: boolean;
-        isOnline: boolean;
-        characters: import("@prisma/client/runtime/library").JsonValue | null;
-        roomCode: string;
-    } | null>;
-    findPlayerName(name: string, roomCode: string): Promise<{
-        id: string;
-        createdAt: Date;
-        socketId: string | null;
-        name: string;
-        isHost: boolean;
-        isReady: boolean;
-        isAlive: boolean;
-        isOnline: boolean;
-        characters: import("@prisma/client/runtime/library").JsonValue | null;
-        roomCode: string;
-    } | null>;
-    findPlayerNameOrThrow(name: string, roomCode: string): Promise<{
-        id: string;
-        createdAt: Date;
-        socketId: string | null;
-        name: string;
-        isHost: boolean;
-        isReady: boolean;
-        isAlive: boolean;
-        isOnline: boolean;
-        characters: import("@prisma/client/runtime/library").JsonValue | null;
-        roomCode: string;
-    }>;
-    dealCards(roomCode: string): Promise<{
-        code: string;
-        gameState: string;
-        players: {
             id: string;
-            socketId: string | null;
-            name: string;
+            token: string;
+            roomId: string;
             isHost: boolean;
+            role: import("@prisma/client").$Enums.PlayerRole;
             isReady: boolean;
             isAlive: boolean;
-            isOnline: boolean;
-            characters: import("@prisma/client/runtime/library").JsonValue;
+            hasLeft: boolean;
+            card: Prisma.JsonValue | null;
+            revealed: string[];
+            joinedAt: Date;
+        };
+    }>;
+    leave(playerId: string, code: string): Promise<{
+        deleted: boolean;
+        duringGame: boolean;
+    }>;
+    setReady(playerId: string, code: string, ready: unknown): Promise<void>;
+    updateSettings(playerId: string, code: string, patch: unknown): Promise<void>;
+    setModerator(playerId: string, code: string, targetId: unknown): Promise<void>;
+    transferHost(playerId: string, code: string, targetId: unknown): Promise<void>;
+    kick(playerId: string, code: string, targetId: unknown): Promise<{
+        name: string;
+        id: string;
+        token: string;
+        roomId: string;
+        isHost: boolean;
+        role: import("@prisma/client").$Enums.PlayerRole;
+        isReady: boolean;
+        isAlive: boolean;
+        hasLeft: boolean;
+        card: Prisma.JsonValue | null;
+        revealed: string[];
+        joinedAt: Date;
+    }>;
+    assertCanStart(playerId: string, code: string): Promise<{
+        room: RoomWithPlayers;
+        players: {
+            name: string;
+            id: string;
+            token: string;
+            roomId: string;
+            isHost: boolean;
+            role: import("@prisma/client").$Enums.PlayerRole;
+            isReady: boolean;
+            isAlive: boolean;
+            hasLeft: boolean;
+            card: Prisma.JsonValue | null;
+            revealed: string[];
+            joinedAt: Date;
         }[];
     }>;
+    private lobbyOf;
+    private memberOf;
+    private hostOf;
     private generateCode;
-    getGameState(roomCode: string): Promise<{
-        gameState: string;
-        playersCount: number;
-        onlineCount: number;
-        readyCount: number;
-        canStart: boolean;
-    }>;
-    private createUsedSet;
-    private generateUniqueCard;
-    private isUnique;
-    private addToUsed;
 }

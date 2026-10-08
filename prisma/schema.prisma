@@ -7,33 +7,64 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum RoomStatus {
+  LOBBY
+  PLAYING
+  FINISHED
+}
+
+enum GameMode {
+  AUTO
+  MODERATED
+}
+
+enum PlayerRole {
+  PLAYER
+  MODERATOR
+}
+
 model Room {
-  id         String   @id @default(uuid())
-  code       String   @unique
-  gameState  String   @default("WAITING")
-  createdAt  DateTime @default(now())
+  id         String     @id @default(uuid())
+  code       String     @unique
+  status     RoomStatus @default(LOBBY)
+  // Settings used for listing/filtering live in columns,
+  // the rest (timers) in `settings` — see settingsOf() in room.view.ts.
+  title      String     @default("")
+  isPublic   Boolean    @default(true)
+  mode       GameMode   @default(AUTO)
+  maxPlayers Int        @default(12)
+  /// { timers: RoomTimers }
+  settings   Json
+  /// Game engine snapshot, null until the game starts
+  game       Json?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
   players    Player[]
-  
+
+  @@index([status, isPublic, mode])
   @@map("rooms")
 }
 
 model Player {
-  id         String   @id @default(uuid())
-  socketId   String?  @unique
+  id       String     @id @default(uuid())
+  /// Secret session token, known only to this player's client
+  token    String     @unique
+  name     String
+  roomId   String
+  room     Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  isHost   Boolean    @default(false)
+  role     PlayerRole @default(PLAYER)
+  isReady  Boolean    @default(false)
+  isAlive  Boolean    @default(true)
+  /// Left the room in the middle of a game
+  hasLeft  Boolean    @default(false)
+  /// PlayerCard (see card.types.ts)
+  card     Json?
+  /// Card keys this player has revealed to everyone
+  revealed String[]   @default([])
+  joinedAt DateTime   @default(now())
 
-  name       String 
-
-  isHost     Boolean @default(false)
-  isReady    Boolean @default(false)
-  isAlive    Boolean @default(true)
-  isOnline   Boolean @default(true)
-
-  roomCode   String
-  room       Room @relation(fields:[roomCode], references:[code])
-
-  characters Json?
-
-  createdAt DateTime @default(now())
-
+  @@unique([roomId, name])
+  @@index([roomId])
   @@map("players")
 }

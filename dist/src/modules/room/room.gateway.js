@@ -14,244 +14,196 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 var RoomGateway_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.RoomGateway = void 0;
-const websockets_1 = require("@nestjs/websockets");
 const common_1 = require("@nestjs/common");
+const websockets_1 = require("@nestjs/websockets");
 const socket_io_1 = require("socket.io");
+const env_1 = require("../../env");
+const game_service_1 = require("../game/game.service");
+const voice_service_1 = require("../voice/voice.service");
+const presence_service_1 = require("./presence.service");
+const realtime_service_1 = require("./realtime.service");
+const room_lock_service_1 = require("./room-lock.service");
 const room_service_1 = require("./room.service");
+const ws_utils_1 = require("./ws-utils");
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 let RoomGateway = RoomGateway_1 = class RoomGateway {
-    roomService;
-    server;
+    rooms;
+    game;
+    presence;
+    realtime;
+    lock;
+    voice;
     logger = new common_1.Logger(RoomGateway_1.name);
-    constructor(roomService) {
-        this.roomService = roomService;
+    cleanupTimer;
+    constructor(rooms, game, presence, realtime, lock, voice) {
+        this.rooms = rooms;
+        this.game = game;
+        this.presence = presence;
+        this.realtime = realtime;
+        this.lock = lock;
+        this.voice = voice;
+    }
+    afterInit(server) {
+        this.realtime.attach(server);
+    }
+    onModuleInit() {
+        this.cleanupTimer = setInterval(() => {
+            this.rooms
+                .deleteAbandoned()
+                .then((count) => {
+                if (count === 0)
+                    return;
+                this.logger.log(`Deleted ${count} abandoned room(s)`);
+                this.realtime.schedulePublicRooms();
+            })
+                .catch((e) => this.logger.error(e));
+        }, CLEANUP_INTERVAL_MS);
+    }
+    onModuleDestroy() {
+        clearInterval(this.cleanupTimer);
     }
     async handleDisconnect(client) {
-        console.log('🔴 Socket disconnected:', client.id);
-        const player = await this.roomService.findPlayer(client);
-        if (!player)
+        const session = (0, ws_utils_1.sessionOf)(client);
+        if (!session)
             return;
-        try {
-            const result = await this.roomService.setOffline(player.name, player.roomCode, client.id);
-            if (!result) {
-                console.log('⚠️ Старый socket, игнорируем:', client.id);
+        if (this.presence.unbind(session.playerId, client.id)) {
+            await this.lock.run(session.roomCode, () => this.realtime.broadcast(session.roomCode));
+        }
+    }
+    watchRooms(client) {
+        return (0, ws_utils_1.handleWs)(this.logger, async () => {
+            await client.join(realtime_service_1.PUBLIC_ROOMS_CHANNEL);
+        });
+    }
+    unwatchRooms(client) {
+        return (0, ws_utils_1.handleWs)(this.logger, async () => {
+            await client.leave(realtime_service_1.PUBLIC_ROOMS_CHANNEL);
+        });
+    }
+    create(client, body) {
+        return (0, ws_utils_1.handleWs)(this.logger, async () => {
+            const { room, player } = await this.rooms.create(body?.name, body?.settings);
+            return this.lock.run(room.code, () => this.enter(client, player, room.code));
+        });
+    }
+    join(client, body) {
+        return (0, ws_utils_1.handleWs)(this.logger, async () => {
+            const code = (0, room_service_1.normalizeCode)(body?.code);
+            return this.lock.run(code, async () => {
+                const { player } = await this.rooms.join(code, body?.name);
+                return this.enter(client, player, code);
+            });
+        });
+    }
+    resume(client, body) {
+        return (0, ws_utils_1.handleWs)(this.logger, async () => {
+            const player = await this.rooms.findByToken(body?.token);
+            return this.lock.run(player.room.code, () => this.enter(client, player, player.room.code));
+        });
+    }
+    leave(client) {
+        return this.inRoom(client, async ({ playerId, roomCode }) => {
+            const result = await this.rooms.leave(playerId, roomCode);
+            this.detach(client, playerId, roomCode);
+            void this.voice.remove(roomCode, playerId);
+            if (result.deleted) {
+                this.realtime.schedulePublicRooms();
                 return;
             }
-            this.server.to(player.roomCode).emit('players:left', {
-                players: result.room.players,
-            });
-            this.logger.log(`${player.name} disconnected`);
-        }
-        catch (e) {
-            this.logger.error(e);
-        }
-    }
-    async create(client, data) {
-        try {
-            const room = await this.roomService.create(data.hostName, client.id);
-            client.join(room.code);
-            client.emit('room:created', {
-                roomCode: room.code,
-                host: room.players[0],
-            });
-            this.logger.log(`Room created ${room.code}`);
-        }
-        catch (e) {
-            client.emit('room:error', {
-                message: e.message,
-            });
-        }
-    }
-    async join(client, data) {
-        try {
-            const player = await this.roomService.findPlayerName(data.playerName, data.roomCode);
-            if (player && !player.isOnline) {
-                return await this.reconnect(client, data);
+            if (result.duringGame) {
+                await this.game.afterLeaveLocked(roomCode, playerId);
             }
-            const room = await this.roomService.join(data, client.id);
-            client.join(data.roomCode);
-            client.emit('room:joined', {
-                roomCode: room.code,
-                player: room.players.find((p) => p.socketId === client.id),
-                players: room.players,
-                gameState: room.gameState,
-                maxPlayers: 12,
-            });
-            client.to(room.code).emit('room:playerJoined', {
-                players: room.players,
-            });
-            this.server.emit('room:playerJoined', {
-                players: room.players,
-            });
-            this.logger.log(`${data.playerName} connect`);
-        }
-        catch (e) {
-            client.emit('room:error', {
-                message: e.message,
-            });
-        }
+            await this.realtime.broadcast(roomCode);
+        });
     }
-    async start(client, data) {
-        try {
-            const result = await this.roomService.gameStart(data.roomCode);
-            for (const player of result.players) {
-                if (!player.socketId)
-                    continue;
-                this.server.to(player.socketId).emit('player:cardReceived', {
-                    character: player.character,
-                });
+    ready(client, body) {
+        return this.inRoom(client, async ({ playerId, roomCode }) => {
+            await this.rooms.setReady(playerId, roomCode, body?.ready);
+            await this.realtime.broadcast(roomCode);
+        });
+    }
+    settings(client, body) {
+        return this.inRoom(client, async ({ playerId, roomCode }) => {
+            await this.rooms.updateSettings(playerId, roomCode, body?.settings);
+            await this.realtime.broadcast(roomCode);
+        });
+    }
+    setModerator(client, body) {
+        return this.inRoom(client, async ({ playerId, roomCode }) => {
+            await this.rooms.setModerator(playerId, roomCode, body?.playerId);
+            await this.realtime.broadcast(roomCode);
+        });
+    }
+    transferHost(client, body) {
+        return this.inRoom(client, async ({ playerId, roomCode }) => {
+            await this.rooms.transferHost(playerId, roomCode, body?.playerId);
+            await this.realtime.broadcast(roomCode);
+        });
+    }
+    kick(client, body) {
+        return this.inRoom(client, async ({ playerId, roomCode }) => {
+            const kicked = await this.rooms.kick(playerId, roomCode, body?.playerId);
+            const kickedSocketId = this.presence.socketOf(kicked.id);
+            const kickedSocket = kickedSocketId
+                ? this.realtime.socket(kickedSocketId)
+                : undefined;
+            if (kickedSocket) {
+                kickedSocket.emit('room:kicked');
+                this.detach(kickedSocket, kicked.id, roomCode);
             }
-            this.server.to(data.roomCode).emit('game:started', {
-                players: result.players.map((p) => ({
-                    name: p.name,
-                    isAlive: p.isAlive,
-                })),
-            });
-            this.logger.log(`Игра началась в комнате ${data.roomCode}`);
-        }
-        catch (e) {
-            client.emit('room:error', {
-                message: e.message,
-            });
-        }
+            void this.voice.remove(roomCode, kicked.id);
+            await this.realtime.broadcast(roomCode);
+        });
     }
-    async reconnect(client, data) {
-        try {
-            const room = await this.roomService.reconnect(data, client);
-            client.join(room.code);
-            const me = room.players.find((p) => p.name === data.playerName);
-            client.emit('room:joined', {
-                roomCode: room.code,
-                player: me,
-                players: room.players,
-                gameState: room.gameState,
-                maxPlayers: 12,
-            });
-            client.to(data.roomCode).emit('room:playerJoined', {
-                players: room.players,
-            });
-            if (room.gameState === 'GAME_RUNNING') {
-                client.emit('game:started', {
-                    players: room.players.map((p) => ({
-                        name: p.name,
-                        isAlive: p.isAlive,
-                    })),
-                });
-            }
-            client.to(room.code).emit('room:playerReconnected', {
-                player: me,
-                players: room.players,
-            });
+    async enter(client, player, roomCode) {
+        const previous = (0, ws_utils_1.sessionOf)(client);
+        if (previous && previous.playerId !== player.id) {
+            this.detach(client, previous.playerId, previous.roomCode);
+            await this.realtime.broadcast(previous.roomCode);
         }
-        catch (e) {
-            client.emit('room:reconnectError', {
-                message: e.message,
-            });
+        const replacedSocketId = this.presence.bind(player.id, client.id);
+        if (replacedSocketId && replacedSocketId !== client.id) {
+            const replaced = this.realtime.socket(replacedSocketId);
+            replaced?.emit('session:replaced');
+            replaced?.disconnect(true);
         }
+        const session = { playerId: player.id, roomCode };
+        client.data = session;
+        await client.join((0, ws_utils_1.roomChannel)(roomCode));
+        await this.realtime.broadcast(roomCode);
+        return { code: roomCode, token: player.token };
     }
-    async getState(client, data) {
-        try {
-            const room = await this.roomService.find(data.roomCode);
-            client.emit('room:joined', {
-                roomCode: room.code,
-                player: room.players.find((p) => p.socketId === client.id),
-                players: room.players,
-                gameState: room.gameState,
-                maxPlayers: 12,
-            });
-        }
-        catch (e) {
-            client.emit('room:error', {
-                message: e.message,
-            });
-        }
+    detach(client, playerId, roomCode) {
+        this.presence.unbind(playerId, client.id);
+        void client.leave((0, ws_utils_1.roomChannel)(roomCode));
+        client.data = undefined;
     }
-    async ready(client, data) {
-        try {
-            const result = await this.roomService.toggleReady(data, client);
-            this.server.to(data.roomCode).emit('room:playersUpdated', {
-                players: result.players,
-                allReady: result.allReady,
-            });
-        }
-        catch (e) {
-            client.emit('room:error', {
-                message: e.message,
-            });
-        }
-    }
-    async myCard(client, data) {
-        try {
-            const card = await this.roomService.getPlayerCard(data.roomCode, data.playerName);
-            client.emit('player:cardReceived', {
-                character: card,
-            });
-        }
-        catch (e) {
-            client.emit('room:error', {
-                message: e.message,
-            });
-        }
-    }
-    async getCard(client, data) {
-        try {
-            const room = await this.roomService.find(data.roomCode);
-            const currentPlayer = room.players.find((p) => p.name === data.playerName);
-            if (!currentPlayer)
-                throw new Error('Игрок не найден');
-            client.emit('host:getCardUp', {
-                playerName: currentPlayer.name,
-                card: currentPlayer.characters,
-            });
-        }
-        catch (e) {
-            client.emit('room:error', {
-                message: `Не удалось получить карту: ${e.message}`,
-            });
-        }
-    }
-    async kickPlayer(client, data) {
-        try {
-            const result = await this.roomService.kick(data);
-            this.server.to(data.roomCode).emit('player:kicked', {
-                kickedPlayer: result.kickedPlayer,
-                players: result.room.players,
-            });
-        }
-        catch (e) {
-            client.emit('room:error', {
-                message: `Cant kick player: ${e.message}`,
-            });
-        }
-    }
-    async leave(client, data) {
-        try {
-            const result = await this.roomService.leave(data.playerName, data.roomCode);
-            client.leave(data.roomCode);
-            this.server.to(data.roomCode).emit('players:left', {
-                players: result?.room.players ?? [],
-            });
-            client.emit('room:left');
-            this.logger.log(`${data.playerName} вышел из комнаты`);
-        }
-        catch (e) {
-            client.emit('room:error', {
-                message: e.message,
-            });
-        }
+    inRoom(client, action) {
+        return (0, ws_utils_1.inRoom)(this.logger, client, (session) => this.lock.run(session.roomCode, () => action(session)));
     }
 };
 exports.RoomGateway = RoomGateway;
 __decorate([
-    (0, websockets_1.WebSocketServer)(),
-    __metadata("design:type", socket_io_1.Server)
-], RoomGateway.prototype, "server", void 0);
+    (0, websockets_1.SubscribeMessage)('rooms:watch'),
+    __param(0, (0, websockets_1.ConnectedSocket)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [socket_io_1.Socket]),
+    __metadata("design:returntype", void 0)
+], RoomGateway.prototype, "watchRooms", null);
+__decorate([
+    (0, websockets_1.SubscribeMessage)('rooms:unwatch'),
+    __param(0, (0, websockets_1.ConnectedSocket)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [socket_io_1.Socket]),
+    __metadata("design:returntype", void 0)
+], RoomGateway.prototype, "unwatchRooms", null);
 __decorate([
     (0, websockets_1.SubscribeMessage)('room:create'),
     __param(0, (0, websockets_1.ConnectedSocket)()),
     __param(1, (0, websockets_1.MessageBody)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [socket_io_1.Socket, Object]),
-    __metadata("design:returntype", Promise)
+    __metadata("design:returntype", void 0)
 ], RoomGateway.prototype, "create", null);
 __decorate([
     (0, websockets_1.SubscribeMessage)('room:join'),
@@ -259,77 +211,70 @@ __decorate([
     __param(1, (0, websockets_1.MessageBody)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [socket_io_1.Socket, Object]),
-    __metadata("design:returntype", Promise)
+    __metadata("design:returntype", void 0)
 ], RoomGateway.prototype, "join", null);
 __decorate([
-    (0, websockets_1.SubscribeMessage)('game:start'),
+    (0, websockets_1.SubscribeMessage)('session:resume'),
     __param(0, (0, websockets_1.ConnectedSocket)()),
     __param(1, (0, websockets_1.MessageBody)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [socket_io_1.Socket, Object]),
-    __metadata("design:returntype", Promise)
-], RoomGateway.prototype, "start", null);
+    __metadata("design:returntype", void 0)
+], RoomGateway.prototype, "resume", null);
 __decorate([
-    (0, websockets_1.SubscribeMessage)('room:reconnect'),
+    (0, websockets_1.SubscribeMessage)('room:leave'),
     __param(0, (0, websockets_1.ConnectedSocket)()),
-    __param(1, (0, websockets_1.MessageBody)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [socket_io_1.Socket, Object]),
-    __metadata("design:returntype", Promise)
-], RoomGateway.prototype, "reconnect", null);
+    __metadata("design:paramtypes", [socket_io_1.Socket]),
+    __metadata("design:returntype", void 0)
+], RoomGateway.prototype, "leave", null);
 __decorate([
-    (0, websockets_1.SubscribeMessage)('room:getState'),
+    (0, websockets_1.SubscribeMessage)('lobby:ready'),
     __param(0, (0, websockets_1.ConnectedSocket)()),
     __param(1, (0, websockets_1.MessageBody)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [socket_io_1.Socket, Object]),
-    __metadata("design:returntype", Promise)
-], RoomGateway.prototype, "getState", null);
-__decorate([
-    (0, websockets_1.SubscribeMessage)('player:ready'),
-    __param(0, (0, websockets_1.ConnectedSocket)()),
-    __param(1, (0, websockets_1.MessageBody)()),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [socket_io_1.Socket, Object]),
-    __metadata("design:returntype", Promise)
+    __metadata("design:returntype", void 0)
 ], RoomGateway.prototype, "ready", null);
 __decorate([
-    (0, websockets_1.SubscribeMessage)('player:myCard'),
+    (0, websockets_1.SubscribeMessage)('lobby:settings'),
     __param(0, (0, websockets_1.ConnectedSocket)()),
     __param(1, (0, websockets_1.MessageBody)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [socket_io_1.Socket, Object]),
-    __metadata("design:returntype", Promise)
-], RoomGateway.prototype, "myCard", null);
+    __metadata("design:returntype", void 0)
+], RoomGateway.prototype, "settings", null);
 __decorate([
-    (0, websockets_1.SubscribeMessage)('host:getCard'),
+    (0, websockets_1.SubscribeMessage)('lobby:setModerator'),
     __param(0, (0, websockets_1.ConnectedSocket)()),
     __param(1, (0, websockets_1.MessageBody)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [socket_io_1.Socket, Object]),
-    __metadata("design:returntype", Promise)
-], RoomGateway.prototype, "getCard", null);
+    __metadata("design:returntype", void 0)
+], RoomGateway.prototype, "setModerator", null);
 __decorate([
-    (0, websockets_1.SubscribeMessage)('host:kick'),
+    (0, websockets_1.SubscribeMessage)('room:transferHost'),
     __param(0, (0, websockets_1.ConnectedSocket)()),
     __param(1, (0, websockets_1.MessageBody)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [socket_io_1.Socket, Object]),
-    __metadata("design:returntype", Promise)
-], RoomGateway.prototype, "kickPlayer", null);
+    __metadata("design:returntype", void 0)
+], RoomGateway.prototype, "transferHost", null);
 __decorate([
-    (0, websockets_1.SubscribeMessage)('player:left'),
+    (0, websockets_1.SubscribeMessage)('lobby:kick'),
     __param(0, (0, websockets_1.ConnectedSocket)()),
     __param(1, (0, websockets_1.MessageBody)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [socket_io_1.Socket, Object]),
-    __metadata("design:returntype", Promise)
-], RoomGateway.prototype, "leave", null);
+    __metadata("design:returntype", void 0)
+], RoomGateway.prototype, "kick", null);
 exports.RoomGateway = RoomGateway = RoomGateway_1 = __decorate([
-    (0, websockets_1.WebSocketGateway)({
-        cors: { origin: '*' },
-        namespace: 'room',
-    }),
-    __metadata("design:paramtypes", [room_service_1.RoomService])
+    (0, websockets_1.WebSocketGateway)({ namespace: 'game', cors: { origin: env_1.CLIENT_ORIGIN } }),
+    __metadata("design:paramtypes", [room_service_1.RoomService,
+        game_service_1.GameService,
+        presence_service_1.PresenceService,
+        realtime_service_1.RealtimeService,
+        room_lock_service_1.RoomLock,
+        voice_service_1.VoiceService])
 ], RoomGateway);
 //# sourceMappingURL=room.gateway.js.map

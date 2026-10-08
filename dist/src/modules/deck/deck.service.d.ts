@@ -1,6 +1,6 @@
-import { IPlayerCard } from './data/characters';
+import { CardKey, PlayerCard } from './card.types';
 export declare class DeckService {
-    constructor();
-    generatePlayerCard(): IPlayerCard;
-    private getRandomItem;
+    deal(count: number): PlayerCard[];
+    randomValue(key: CardKey, exclude?: string[]): string;
+    private valuesOf;
 }

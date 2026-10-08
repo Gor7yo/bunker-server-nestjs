@@ -3,7 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.PROPERTY_CATEGORIES = void 0;
 exports.PROPERTY_CATEGORIES = [
     {
-        category: 'bandage',
+        category: 'baggage',
         items: [
             { id: 1, value: 'Аптечка' },
             { id: 2, value: 'Тушёнка' },
@@ -163,7 +163,7 @@ exports.PROPERTY_CATEGORIES = [
         ],
     },
     {
-        category: 'fobia',
+        category: 'phobia',
         items: [
             {
                 id: 71,
@@ -362,7 +362,7 @@ exports.PROPERTY_CATEGORIES = [
         ],
     },
     {
-        category: 'hobbie',
+        category: 'hobby',
         items: [
             { id: 121, value: 'Ведёт дневник выжившего', experience: '1 месяц' },
             {

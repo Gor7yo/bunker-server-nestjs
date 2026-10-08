@@ -1,40 +1,20 @@
+import { CardKey } from '../card.types';
+
 export interface IPropertyItem {
+  id: number;
   value: string;
   description?: string;
   experience?: string;
-  id: number;
 }
 
 export interface IPropertyCategory {
-  category: string;
+  category: CardKey;
   items: IPropertyItem[];
 }
 
-export type IPlayerCard = {
-  age: string | null;
-  profession: string | null;
-  health: string | null;
-  fobia: string | null;
-  hobbie: string | null;
-  bandage: string | null;
-  action: string | null;
-  fact: string | null;
-};
-
-export type UsedCards = {
-  age: Set<string>;
-  profession: Set<string>;
-  health: Set<string>;
-  fobia: Set<string>;
-  hobbie: Set<string>;
-  bandage: Set<string>;
-  action: Set<string>;
-  fact: Set<string>;
-};
-
 export const PROPERTY_CATEGORIES: IPropertyCategory[] = [
   {
-    category: 'bandage',
+    category: 'baggage',
     items: [
       { id: 1, value: 'Аптечка' },
       { id: 2, value: 'Тушёнка' },
@@ -205,7 +185,7 @@ export const PROPERTY_CATEGORIES: IPropertyCategory[] = [
     ],
   },
   {
-    category: 'fobia',
+    category: 'phobia',
     items: [
       {
         id: 71,
@@ -413,7 +393,7 @@ export const PROPERTY_CATEGORIES: IPropertyCategory[] = [
     ],
   },
   {
-    category: 'hobbie',
+    category: 'hobby',
     items: [
       { id: 121, value: 'Ведёт дневник выжившего', experience: '1 месяц' },
       {

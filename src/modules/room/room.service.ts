@@ -1,487 +1,411 @@
-import {
-  Injectable,
-  NotFoundException,
-  BadRequestException,
-  Logger,
-} from '@nestjs/common';
-import { PrismaService } from '../../prisma/prisma.service';
-import { DeckService } from '../deck/deck.service';
-import { Socket } from 'socket.io';
-import { IPlayer } from 'src/common/interfaces/player.interface';
-import { randomBytes } from 'crypto';
+import { Injectable } from '@nestjs/common';
+import { Player, Prisma } from '@prisma/client';
+import { randomBytes, randomInt } from 'crypto';
 
-interface CardSets {
-  age: Set<string>;
-  profession: Set<string>;
-  health: Set<string>;
-  fobia: Set<string>;
-  hobbie: Set<string>;
-  bandage: Set<string>;
-  action: Set<string>;
-  fact: Set<string>;
-}
+import { GameError } from '../../common/game-error';
+import { PrismaService } from '../../prisma/prisma.service';
+import { PresenceService } from './presence.service';
+import {
+  DEFAULT_SETTINGS,
+  PLAYER_LIMITS,
+  TITLE_MAX_LENGTH,
+  mergeSettings,
+} from './room.settings';
+import { PublicRoomSummary } from './room.types';
+import { RoomFilters } from './room.filters';
+import { RoomWithPlayers, settingsData, settingsOf } from './room.view';
+
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const CODE_LENGTH = 5;
+const NAME_MAX_LENGTH = 20;
+/** Upper bound of rooms read from the DB for one list request. */
+const PUBLIC_LIST_SCAN_LIMIT = 300;
+/** Rooms nobody is connected to are deleted after this much inactivity. */
+const ABANDONED_AFTER_MS = 30 * 60 * 1000;
+
+const newToken = () => randomBytes(24).toString('base64url');
+
+/** Players occupying a slot: not the moderator, not those who left. */
+const activePlayers = (room: RoomWithPlayers) =>
+  room.players.filter((p) => p.role === 'PLAYER' && !p.hasLeft);
+
+export const normalizeName = (raw: unknown): string => {
+  const name = typeof raw === 'string' ? raw.trim().replace(/\s+/g, ' ') : '';
+  if (!name) throw new GameError('Введите имя');
+  if (name.length > NAME_MAX_LENGTH) {
+    throw new GameError(`Имя длиннее ${NAME_MAX_LENGTH} символов`);
+  }
+  return name;
+};
+
+export const normalizeCode = (raw: unknown): string => {
+  const code = typeof raw === 'string' ? raw.trim().toUpperCase() : '';
+  if (!code) throw new GameError('Введите код комнаты');
+  return code;
+};
 
 @Injectable()
 export class RoomService {
   constructor(
-    private prisma: PrismaService,
-    private deck: DeckService,
+    private readonly prisma: PrismaService,
+    private readonly presence: PresenceService,
   ) {}
 
-  private readonly logger = new Logger(RoomService.name);
-
-  async create(hostName: string, socketId: string) {
-    const code = await this.generateCode();
-
-    const room = await this.prisma.room.create({
-      data: {
-        code,
-        players: {
-          create: {
-            name: hostName,
-            socketId,
-            isHost: true,
-          },
-        },
-      },
-      include: {
-        players: true,
-      },
-    });
-
-    return room;
-  }
-
-  async find(code: string) {
+  async findByCode(code: string): Promise<RoomWithPlayers> {
     const room = await this.prisma.room.findUnique({
       where: { code },
-      select: {
-        code: true,
-        gameState: true,
-        players: {
-          orderBy: { createdAt: 'asc' },
-          select: {
-            id: true,
-            characters: true,
-            name: true,
-            isHost: true,
-            isReady: true,
-            isOnline: true,
-            isAlive: true,
-            socketId: true,
-          },
-        },
-      },
+      include: { players: true },
     });
-
-    if (!room) throw new NotFoundException('Room not found');
-
+    if (!room) throw new GameError('Комната не найдена');
     return room;
   }
 
-  async gameStart(roomCode: string) {
-    const room = await this.find(roomCode);
-
-    if (room.players.length < 2) {
-      throw new BadRequestException('Need 2 or more players');
+  async findByToken(token: unknown) {
+    if (typeof token !== 'string' || !token) {
+      throw new GameError('Сессия не найдена');
     }
-
-    const allReady = room.players.every((p) => p.isReady);
-    if (!allReady) {
-      throw new BadRequestException('All is doesnt ready');
-    }
-
-    const updatedRoom = await this.dealCards(roomCode);
-
-    return {
-      players: updatedRoom.players.map((player) => ({
-        socketId: player.socketId,
-        character: player.characters,
-        name: player.name,
-        isAlive: player.isAlive,
-      })),
-    };
-  }
-
-  async join(data: { roomCode: string; playerName: string }, clientId: string) {
-    const room = await this.find(data.roomCode);
-
-    if (room.gameState !== 'WAITING') {
-      throw new BadRequestException('Game already started');
-    }
-
-    if (room.players.length >= 12) {
-      throw new BadRequestException('Room is full');
-    }
-
-    const exists = await this.prisma.player.findFirst({
-      where: {
-        name: data.playerName,
-        roomCode: data.roomCode,
-      },
-    });
-
-    if (exists && exists.isOnline) {
-      throw new BadRequestException('Player already in room');
-    }
-
-    await this.prisma.player.create({
-      data: {
-        name: data.playerName,
-        socketId: clientId,
-        roomCode: data.roomCode,
-        isOnline: true,
-      },
-    });
-
-    return this.find(room.code);
-  }
-
-  async kick(data: { roomCode: string; playerName: string }) {
-    const player = await this.findPlayerNameOrThrow(
-      data.playerName,
-      data.roomCode,
-    );
-
-    const kickedPlayer = await this.prisma.player.delete({
-      where: { id: player.id },
-    });
-
-    const room = await this.find(data.roomCode);
-
-    return { kickedPlayer, room };
-  }
-
-  async leave(playerName: string, roomCode: string) {
-    const player = await this.findPlayerNameOrThrow(playerName, roomCode);
-
-    if (player.isHost) {
-      const newHost = await this.prisma.player.findFirst({
-        where: {
-          roomCode,
-          id: { not: player.id },
-          isOnline: true,
-        },
-        orderBy: {
-          createdAt: 'asc',
-        },
-      });
-
-      if (newHost) {
-        await this.prisma.player.update({
-          where: { id: newHost.id },
-          data: { isHost: true },
-        });
-      }
-    }
-
-    await this.prisma.player.update({
-      where: { id: player.id },
-      data: {
-        isOnline: false,
-      },
-    });
-
-    const updatedRoom = await this.find(roomCode);
-
-    if (updatedRoom.players.every((p) => p.isOnline === false)) {
-      await this.prisma.player.deleteMany({
-        where: { roomCode: updatedRoom.code },
-      });
-      
-      await this.prisma.room.delete({
-        where: { code: updatedRoom.code },
-      });
-
-      await this.prisma.player.deleteMany({
-        where: { roomCode: updatedRoom.code },
-      });
-
-      return;
-    }
-
-    return {
-      room: updatedRoom,
-      playerName: player.name,
-    };
-  }
-
-  async setOffline(playerName: string, roomCode: string, clientId: string) {
-    const player = await this.findPlayerNameOrThrow(playerName, roomCode);
-
-    if (player.socketId !== clientId) {
-      return null;
-    }
-
-    return this.prisma.player.update({
-      where: {
-        id: player.id,
-      },
-      data: {
-        isOnline: false,
-      },
-      include: {
-        room: {
-          include: {
-            players: true,
-          },
-        },
-      },
-    });
-  }
-
-  async removePlayer(playerId: string) {
     const player = await this.prisma.player.findUnique({
-      where: { id: playerId },
+      where: { token },
+      include: { room: true },
     });
-
-    if (!player) throw new NotFoundException('Игрок не найден');
-
-    if (player.isHost) {
-      const newHost = await this.prisma.player.findFirst({
-        where: {
-          roomCode: player.roomCode,
-          id: { not: playerId },
-          isOnline: true,
-        },
-      });
-
-      if (newHost) {
-        await this.prisma.player.update({
-          where: { id: newHost.id },
-          data: { isHost: true },
-        });
-      }
-    }
-
-    await this.prisma.player.delete({
-      where: { id: playerId },
-    });
-  }
-
-  async reconnect(
-    data: { roomCode: string; playerName: string },
-    client: Socket,
-  ) {
-    const player = await this.findPlayerNameOrThrow(
-      data.playerName,
-      data.roomCode,
-    );
-
-    await this.prisma.player.update({
-      where: {
-        id: player.id,
-      },
-      data: {
-        socketId: client.id,
-        isOnline: true,
-      },
-    });
-
-    return this.find(data.roomCode);
-  }
-
-  async getPlayerCard(roomCode: string, playerName: string) {
-    const room = await this.find(roomCode);
-
-    const player = room.players.find((p) => p.name === playerName);
-
-    if (!player) {
-      throw new NotFoundException('Игрок не найден');
-    }
-
-    if (!player.characters) {
-      throw new BadRequestException('Карта еще не выдана');
-    }
-
-    return player.characters;
-  }
-
-  async toggleReady(
-    data: { playerName: string; roomCode: string },
-    client: Socket,
-  ) {
-    const player = await this.findPlayerNameOrThrow(
-      data.playerName,
-      data.roomCode,
-    );
-
-    if (player.socketId !== client.id) {
-      await this.prisma.player.update({
-        where: { id: player.id },
-        data: { socketId: client.id, isReady: !player.isReady },
-      });
-    } else {
-      await this.prisma.player.update({
-        where: { id: player.id },
-        data: { isReady: !player.isReady },
-      });
-    }
-
-    const players = (await this.find(data.roomCode)).players
-      .map(({ name, isHost, characters, isAlive, isOnline, isReady }) => ({
-        name,
-        isHost,
-        isReady,
-        characters,
-        isAlive,
-        isOnline,
-      }))
-      .sort((a, b) => a.name.length - b.name.length);
-    const allReady = players.every((p) => p.isReady);
-
-    console.log('Players: ' + JSON.stringify(players));
-
-    return { players, allReady };
-  }
-
-  async updateSocketId(oldId: string, newId: string) {
-    await this.prisma.player.update({
-      where: { socketId: oldId },
-      data: { socketId: newId },
-    });
-  }
-
-  async findPlayer(client: any) {
-    return this.prisma.player.findFirst({
-      where: { socketId: client.id },
-    });
-  }
-
-  async findPlayerName(name: string, roomCode: string) {
-    return await this.prisma.player.findFirst({
-      where: {
-        name,
-        roomCode,
-      },
-    });
-  }
-
-  async findPlayerNameOrThrow(name: string, roomCode: string) {
-    const player = await this.prisma.player.findFirst({
-      where: {
-        name,
-        roomCode,
-      },
-    });
-
-    if (!player) {
-      throw new NotFoundException('Player not found');
-    }
-
+    if (!player || player.hasLeft) throw new GameError('Сессия не найдена');
     return player;
   }
 
-  async dealCards(roomCode: string) {
-    const room = await this.find(roomCode);
+  /**
+   * Public lobbies matching the filters. Title/host search, mode and
+   * visibility are filtered by the DB; online presence and free slots live
+   * in memory, so they are applied afterwards.
+   */
+  async listPublic(
+    filters: RoomFilters,
+  ): Promise<{ rooms: PublicRoomSummary[]; total: number }> {
+    const search = filters.q
+      ? { contains: filters.q, mode: 'insensitive' as const }
+      : undefined;
 
-    const used = this.createUsedSet();
-
-    const playerIds = room.players.map((player) => player.id);
-
-    await this.prisma.$transaction(
-      playerIds.map((playerId) => {
-        const card = this.generateUniqueCard(used);
-
-        return this.prisma.player.update({
-          where: {
-            id: playerId,
-          },
-          data: {
-            characters: card,
-          },
-        });
-      }),
-    );
-
-    await this.prisma.room.update({
+    const rooms = await this.prisma.room.findMany({
       where: {
-        code: roomCode,
+        status: 'LOBBY',
+        isPublic: true,
+        ...(filters.mode && { mode: filters.mode }),
+        ...(search && {
+          OR: [
+            { title: search },
+            { players: { some: { isHost: true, name: search } } },
+          ],
+        }),
       },
-      data: {
-        gameState: 'GAME_RUNNING',
-      },
+      include: { players: true },
+      orderBy: { createdAt: 'desc' },
+      take: PUBLIC_LIST_SCAN_LIMIT,
     });
 
-    return await this.find(roomCode);
+    const summaries = rooms
+      .filter((room) => room.players.some((p) => this.presence.isOnline(p.id)))
+      .map<PublicRoomSummary>((room) => ({
+        code: room.code,
+        title: room.title,
+        mode: room.mode,
+        hostName: room.players.find((p) => p.isHost)?.name ?? '',
+        players: activePlayers(room).length,
+        maxPlayers: room.maxPlayers,
+      }))
+      .filter((room) => !filters.freeSlots || room.players < room.maxPlayers);
+
+    if (filters.sort === 'popular') {
+      // Stable sort: ties keep the DB order (newest first).
+      summaries.sort((a, b) => b.players - a.players);
+    }
+
+    return {
+      total: summaries.length,
+      rooms: summaries.slice(0, filters.limit),
+    };
+  }
+
+  /** Deletes stale rooms with nobody connected. Returns how many. */
+  async deleteAbandoned(): Promise<number> {
+    const stale = await this.prisma.room.findMany({
+      where: { updatedAt: { lt: new Date(Date.now() - ABANDONED_AFTER_MS) } },
+      select: { id: true, players: { select: { id: true } } },
+    });
+
+    const ids = stale
+      .filter((room) => !room.players.some((p) => this.presence.isOnline(p.id)))
+      .map((room) => room.id);
+
+    if (ids.length > 0) {
+      await this.prisma.room.deleteMany({ where: { id: { in: ids } } });
+    }
+    return ids.length;
+  }
+
+  async create(rawName: unknown, settingsPatch: unknown) {
+    const name = normalizeName(rawName);
+    const settings = mergeSettings(DEFAULT_SETTINGS, settingsPatch);
+    if (!settings.title) {
+      settings.title = `Комната ${name}`.slice(0, TITLE_MAX_LENGTH);
+    }
+
+    const room = await this.prisma.room.create({
+      data: {
+        code: await this.generateCode(),
+        ...settingsData(settings),
+        players: {
+          create: {
+            name,
+            token: newToken(),
+            isHost: true,
+            role: settings.mode === 'MODERATED' ? 'MODERATOR' : 'PLAYER',
+          },
+        },
+      },
+      include: { players: true },
+    });
+
+    return { room, player: room.players[0] };
+  }
+
+  async join(code: string, rawName: unknown) {
+    const name = normalizeName(rawName);
+    const room = await this.findByCode(code);
+
+    if (room.status !== 'LOBBY') throw new GameError('Игра уже началась');
+
+    if (activePlayers(room).length >= settingsOf(room).maxPlayers) {
+      throw new GameError('Комната заполнена');
+    }
+
+    const taken = room.players.some(
+      (p) => p.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (taken) throw new GameError('Это имя уже занято в комнате');
+
+    const player = await this.prisma.player.create({
+      data: { name, token: newToken(), roomId: room.id },
+    });
+
+    return { room, player };
+  }
+
+  /**
+   * In the lobby the player is removed; during a game they are only marked
+   * as left so the history stays. The room is deleted when nobody is left.
+   */
+  async leave(
+    playerId: string,
+    code: string,
+  ): Promise<{ deleted: boolean; duringGame: boolean }> {
+    const room = await this.findByCode(code);
+    const player = this.memberOf(room, playerId);
+
+    if (room.status === 'LOBBY') {
+      await this.prisma.player.delete({ where: { id: player.id } });
+    } else {
+      await this.prisma.player.update({
+        where: { id: player.id },
+        data: { hasLeft: true, isHost: false },
+      });
+    }
+
+    const remaining = room.players.filter(
+      (p) => p.id !== player.id && !p.hasLeft,
+    );
+
+    if (remaining.length === 0) {
+      await this.prisma.room.delete({ where: { id: room.id } });
+      return { deleted: true, duringGame: false };
+    }
+
+    if (player.isHost) {
+      const successor =
+        remaining.find((p) => this.presence.isOnline(p.id)) ?? remaining[0];
+      await this.prisma.player.update({
+        where: { id: successor.id },
+        data: { isHost: true },
+      });
+    }
+
+    return { deleted: false, duringGame: room.status === 'PLAYING' };
+  }
+
+  async setReady(playerId: string, code: string, ready: unknown) {
+    const room = await this.lobbyOf(code);
+    const player = this.memberOf(room, playerId);
+
+    await this.prisma.player.update({
+      where: { id: player.id },
+      data: { isReady: ready === true },
+    });
+  }
+
+  async updateSettings(playerId: string, code: string, patch: unknown) {
+    const room = await this.lobbyOf(code);
+    this.hostOf(room, playerId);
+
+    const current = settingsOf(room);
+    const next = mergeSettings(current, patch);
+    const moderators = room.players.filter((p) => p.role === 'MODERATOR');
+
+    const ops: Prisma.PrismaPromise<unknown>[] = [];
+    let playerCount = activePlayers(room).length;
+
+    if (current.mode !== next.mode && next.mode === 'AUTO') {
+      // Without a moderator everyone becomes a regular player.
+      playerCount += moderators.length;
+      ops.push(
+        this.prisma.player.updateMany({
+          where: { roomId: room.id, role: 'MODERATOR' },
+          data: { role: 'PLAYER' },
+        }),
+      );
+    }
+
+    if (current.mode !== next.mode && next.mode === 'MODERATED') {
+      // The host moderates by default, they can hand it over later.
+      const host = room.players.find((p) => p.isHost)!;
+      playerCount -= 1;
+      ops.push(
+        this.prisma.player.update({
+          where: { id: host.id },
+          data: { role: 'MODERATOR' },
+        }),
+      );
+    }
+
+    if (playerCount > next.maxPlayers) {
+      throw new GameError(
+        `В комнате уже ${playerCount} игроков — лимит не может быть меньше`,
+      );
+    }
+
+    await this.prisma.$transaction([
+      ...ops,
+      this.prisma.room.update({
+        where: { id: room.id },
+        data: settingsData(next),
+      }),
+    ]);
+  }
+
+  async setModerator(playerId: string, code: string, targetId: unknown) {
+    const room = await this.lobbyOf(code);
+    this.hostOf(room, playerId);
+
+    if (settingsOf(room).mode !== 'MODERATED') {
+      throw new GameError('Ведущий есть только в режиме с ведущим');
+    }
+
+    const target = this.memberOf(room, targetId);
+    if (target.role === 'MODERATOR') return;
+
+    await this.prisma.$transaction([
+      this.prisma.player.updateMany({
+        where: { roomId: room.id, role: 'MODERATOR' },
+        data: { role: 'PLAYER' },
+      }),
+      this.prisma.player.update({
+        where: { id: target.id },
+        data: { role: 'MODERATOR', isReady: false },
+      }),
+    ]);
+  }
+
+  async transferHost(playerId: string, code: string, targetId: unknown) {
+    const room = await this.findByCode(code);
+    const host = this.hostOf(room, playerId);
+    const target = this.memberOf(room, targetId);
+    if (target.id === host.id) return;
+
+    await this.prisma.$transaction([
+      this.prisma.player.update({
+        where: { id: host.id },
+        data: { isHost: false },
+      }),
+      this.prisma.player.update({
+        where: { id: target.id },
+        data: { isHost: true, isReady: false },
+      }),
+    ]);
+  }
+
+  /** Removes a player from the lobby. Returns the kicked player. */
+  async kick(playerId: string, code: string, targetId: unknown) {
+    const room = await this.lobbyOf(code);
+    const host = this.hostOf(room, playerId);
+    const target = this.memberOf(room, targetId);
+
+    if (target.id === host.id) throw new GameError('Нельзя выгнать себя');
+
+    await this.prisma.player.delete({ where: { id: target.id } });
+    return target;
+  }
+
+  /** Validates that the host can start; returns the future card holders. */
+  async assertCanStart(playerId: string, code: string) {
+    const room = await this.lobbyOf(code);
+    const host = this.hostOf(room, playerId);
+    const settings = settingsOf(room);
+    const players = activePlayers(room);
+
+    if (players.length < PLAYER_LIMITS.min) {
+      throw new GameError(`Нужно минимум ${PLAYER_LIMITS.min} игрока`);
+    }
+
+    if (
+      settings.mode === 'MODERATED' &&
+      !room.players.some((p) => p.role === 'MODERATOR')
+    ) {
+      throw new GameError('Назначьте ведущего');
+    }
+
+    const notReady = room.players.filter((p) => p.id !== host.id && !p.isReady);
+    if (notReady.length > 0) {
+      throw new GameError(
+        `Не готовы: ${notReady.map((p) => p.name).join(', ')}`,
+      );
+    }
+
+    const offline = room.players.filter((p) => !this.presence.isOnline(p.id));
+    if (offline.length > 0) {
+      throw new GameError(
+        `Не в сети: ${offline.map((p) => p.name).join(', ')}`,
+      );
+    }
+
+    return { room, players };
+  }
+
+  private async lobbyOf(code: string) {
+    const room = await this.findByCode(code);
+    if (room.status !== 'LOBBY') {
+      throw new GameError('Это можно сделать только до начала игры');
+    }
+    return room;
+  }
+
+  private memberOf(room: RoomWithPlayers, playerId: unknown): Player {
+    const player = room.players.find((p) => p.id === playerId && !p.hasLeft);
+    if (!player) throw new GameError('Игрок не найден');
+    return player;
+  }
+
+  private hostOf(room: RoomWithPlayers, playerId: string): Player {
+    const player = this.memberOf(room, playerId);
+    if (!player.isHost) throw new GameError('Это может сделать только хост');
+    return player;
   }
 
   private async generateCode(): Promise<string> {
-    while (true) {
-      const code = randomBytes(3).toString('hex').toUpperCase();
+    for (;;) {
+      const code = Array.from(
+        { length: CODE_LENGTH },
+        () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)],
+      ).join('');
 
-      const exists = await this.prisma.room.findUnique({
-        where: {
-          code,
-        },
-      });
-
+      const exists = await this.prisma.room.findUnique({ where: { code } });
       if (!exists) return code;
     }
-  }
-
-  async getGameState(roomCode: string) {
-    const room = await this.find(roomCode);
-
-    return {
-      gameState: room.gameState,
-      playersCount: room.players.length,
-      onlineCount: room.players.filter((p) => p.isOnline).length,
-      readyCount: room.players.filter((p) => p.isReady).length,
-      canStart:
-        room.players.length >= 2 && room.players.every((p) => p.isReady),
-    };
-  }
-
-  private createUsedSet(): CardSets {
-    return {
-      age: new Set(),
-      profession: new Set(),
-      health: new Set(),
-      fobia: new Set(),
-      hobbie: new Set(),
-      bandage: new Set(),
-      action: new Set(),
-      fact: new Set(),
-    };
-  }
-
-  private generateUniqueCard(used: any) {
-    for (let i = 0; i < 100; i++) {
-      const card = this.deck.generatePlayerCard();
-      if (this.isUnique(used, card)) {
-        this.addToUsed(used, card);
-        return card;
-      }
-    }
-    throw new Error('Не удалось сгенерировать уникальную карту');
-  }
-
-  private isUnique(used: any, card: any): boolean {
-    const fields = [
-      'age',
-      'profession',
-      'health',
-      'fobia',
-      'hobbie',
-      'bandage',
-      'action',
-      'fact',
-    ];
-    return fields.every((f) => !used[f].has(card[f]));
-  }
-
-  private addToUsed(used: any, card: any) {
-    const fields = [
-      'age',
-      'profession',
-      'health',
-      'fobia',
-      'hobbie',
-      'bandage',
-      'action',
-      'fact',
-    ];
-    fields.forEach((f) => used[f].add(card[f]));
   }
 }

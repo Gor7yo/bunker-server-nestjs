@@ -1,349 +1,234 @@
+import { Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import {
   ConnectedSocket,
   MessageBody,
   OnGatewayDisconnect,
+  OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
-  WebSocketServer,
 } from '@nestjs/websockets';
-import { Logger } from '@nestjs/common';
-import { Server, Socket } from 'socket.io';
+import { Player } from '@prisma/client';
+import { Namespace, Socket } from 'socket.io';
 
-import { RoomService } from './room.service';
-import { IPlayer } from 'src/common/interfaces/player.interface';
+import { CLIENT_ORIGIN } from '../../env';
+import { GameService } from '../game/game.service';
+import { VoiceService } from '../voice/voice.service';
+import { PresenceService } from './presence.service';
+import { PUBLIC_ROOMS_CHANNEL, RealtimeService } from './realtime.service';
+import { RoomLock } from './room-lock.service';
+import { RoomService, normalizeCode } from './room.service';
+import { handleWs, inRoom, roomChannel, sessionOf } from './ws-utils';
+import type { Body, SocketSession } from './ws-utils';
 
-@WebSocketGateway({
-  cors: { origin: '*' },
-  namespace: 'room',
-})
-export class RoomGateway implements OnGatewayDisconnect {
-  @WebSocketServer()
-  server!: Server;
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
+/**
+ * Rooms and lobby. Client → server events answer through the socket.io ack
+ * with `{ ok, data | error }`; state changes are pushed as `room:state`.
+ */
+@WebSocketGateway({ namespace: 'game', cors: { origin: CLIENT_ORIGIN } })
+export class RoomGateway
+  implements OnGatewayInit, OnGatewayDisconnect, OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(RoomGateway.name);
+  private cleanupTimer?: NodeJS.Timeout;
 
-  constructor(private readonly roomService: RoomService) {}
+  constructor(
+    private readonly rooms: RoomService,
+    private readonly game: GameService,
+    private readonly presence: PresenceService,
+    private readonly realtime: RealtimeService,
+    private readonly lock: RoomLock,
+    private readonly voice: VoiceService,
+  ) {}
+
+  afterInit(server: Namespace) {
+    this.realtime.attach(server);
+  }
+
+  onModuleInit() {
+    this.cleanupTimer = setInterval(() => {
+      this.rooms
+        .deleteAbandoned()
+        .then((count) => {
+          if (count === 0) return;
+          this.logger.log(`Deleted ${count} abandoned room(s)`);
+          this.realtime.schedulePublicRooms();
+        })
+        .catch((e: unknown) => this.logger.error(e));
+    }, CLEANUP_INTERVAL_MS);
+  }
+
+  onModuleDestroy() {
+    clearInterval(this.cleanupTimer);
+  }
 
   async handleDisconnect(client: Socket) {
-    console.log('🔴 Socket disconnected:', client.id);
+    const session = sessionOf(client);
+    if (!session) return;
 
-    const player = await this.roomService.findPlayer(client);
-
-    if (!player) return;
-
-    try {
-      const result = await this.roomService.setOffline(
-        player.name,
-        player.roomCode,
-        client.id,
+    if (this.presence.unbind(session.playerId, client.id)) {
+      await this.lock.run(session.roomCode, () =>
+        this.realtime.broadcast(session.roomCode),
       );
-
-      if (!result) {
-        console.log('⚠️ Старый socket, игнорируем:', client.id);
-        return;
-      }
-
-      this.server.to(player.roomCode).emit('players:left', {
-        players: result.room.players,
-      });
-
-      this.logger.log(`${player.name} disconnected`);
-    } catch (e) {
-      this.logger.error(e);
     }
+  }
+
+  /**
+   * Home page: subscribe to `rooms:changed` signals. The list itself is
+   * fetched over HTTP (GET /rooms) with the client's own filters.
+   */
+  @SubscribeMessage('rooms:watch')
+  watchRooms(@ConnectedSocket() client: Socket) {
+    return handleWs(this.logger, async () => {
+      await client.join(PUBLIC_ROOMS_CHANNEL);
+    });
+  }
+
+  @SubscribeMessage('rooms:unwatch')
+  unwatchRooms(@ConnectedSocket() client: Socket) {
+    return handleWs(this.logger, async () => {
+      await client.leave(PUBLIC_ROOMS_CHANNEL);
+    });
   }
 
   @SubscribeMessage('room:create')
-  async create(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { hostName: string },
-  ) {
-    try {
-      const room = await this.roomService.create(data.hostName, client.id);
-
-      client.join(room.code);
-
-      client.emit('room:created', {
-        roomCode: room.code,
-        host: room.players[0],
-      });
-
-      this.logger.log(`Room created ${room.code}`);
-    } catch (e: any) {
-      client.emit('room:error', {
-        message: e.message,
-      });
-    }
+  create(@ConnectedSocket() client: Socket, @MessageBody() body: Body) {
+    return handleWs(this.logger, async () => {
+      const { room, player } = await this.rooms.create(
+        body?.name,
+        body?.settings,
+      );
+      return this.lock.run(room.code, () =>
+        this.enter(client, player, room.code),
+      );
+    });
   }
 
   @SubscribeMessage('room:join')
-  async join(
-    @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      roomCode: string;
-      playerName: string;
-    },
-  ) {
-    try {
-      const player = await this.roomService.findPlayerName(
-        data.playerName,
-        data.roomCode,
-      );
+  join(@ConnectedSocket() client: Socket, @MessageBody() body: Body) {
+    return handleWs(this.logger, async () => {
+      const code = normalizeCode(body?.code);
+      return this.lock.run(code, async () => {
+        const { player } = await this.rooms.join(code, body?.name);
+        return this.enter(client, player, code);
+      });
+    });
+  }
 
-      if (player && !player.isOnline) {
-        return await this.reconnect(client, data);
+  @SubscribeMessage('session:resume')
+  resume(@ConnectedSocket() client: Socket, @MessageBody() body: Body) {
+    return handleWs(this.logger, async () => {
+      const player = await this.rooms.findByToken(body?.token);
+      return this.lock.run(player.room.code, () =>
+        this.enter(client, player, player.room.code),
+      );
+    });
+  }
+
+  @SubscribeMessage('room:leave')
+  leave(@ConnectedSocket() client: Socket) {
+    return this.inRoom(client, async ({ playerId, roomCode }) => {
+      const result = await this.rooms.leave(playerId, roomCode);
+      this.detach(client, playerId, roomCode);
+      void this.voice.remove(roomCode, playerId);
+      if (result.deleted) {
+        this.realtime.schedulePublicRooms();
+        return;
       }
-      const room = await this.roomService.join(data, client.id);
-
-      client.join(data.roomCode);
-
-      client.emit('room:joined', {
-        roomCode: room.code,
-        player: room.players.find((p) => p.socketId === client.id),
-        players: room.players,
-        gameState: room.gameState,
-        maxPlayers: 12,
-      });
-
-      client.to(room.code).emit('room:playerJoined', {
-        players: room.players,
-      });
-
-      this.server.emit('room:playerJoined', {
-        players: room.players,
-      });
-
-      this.logger.log(`${data.playerName} connect`);
-    } catch (e: any) {
-      client.emit('room:error', {
-        message: e.message,
-      });
-    }
-  }
-
-  @SubscribeMessage('game:start')
-  async start(
-    @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      roomCode: string;
-    },
-  ) {
-    try {
-      const result = await this.roomService.gameStart(data.roomCode);
-
-      for (const player of result.players) {
-        if (!player.socketId) continue;
-
-        this.server.to(player.socketId).emit('player:cardReceived', {
-          character: player.character,
-        });
+      if (result.duringGame) {
+        await this.game.afterLeaveLocked(roomCode, playerId);
       }
-
-      this.server.to(data.roomCode).emit('game:started', {
-        players: result.players.map((p) => ({
-          name: p.name,
-          isAlive: p.isAlive,
-        })),
-      });
-
-      this.logger.log(`Игра началась в комнате ${data.roomCode}`);
-    } catch (e: any) {
-      client.emit('room:error', {
-        message: e.message,
-      });
-    }
+      await this.realtime.broadcast(roomCode);
+    });
   }
 
-  @SubscribeMessage('room:reconnect')
-  async reconnect(
-    @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      roomCode: string;
-      playerName: string;
-    },
-  ) {
-    try {
-      const room = await this.roomService.reconnect(data, client);
+  @SubscribeMessage('lobby:ready')
+  ready(@ConnectedSocket() client: Socket, @MessageBody() body: Body) {
+    return this.inRoom(client, async ({ playerId, roomCode }) => {
+      await this.rooms.setReady(playerId, roomCode, body?.ready);
+      await this.realtime.broadcast(roomCode);
+    });
+  }
 
-      client.join(room.code);
+  @SubscribeMessage('lobby:settings')
+  settings(@ConnectedSocket() client: Socket, @MessageBody() body: Body) {
+    return this.inRoom(client, async ({ playerId, roomCode }) => {
+      await this.rooms.updateSettings(playerId, roomCode, body?.settings);
+      await this.realtime.broadcast(roomCode);
+    });
+  }
 
-      const me = room.players.find((p) => p.name === data.playerName);
+  @SubscribeMessage('lobby:setModerator')
+  setModerator(@ConnectedSocket() client: Socket, @MessageBody() body: Body) {
+    return this.inRoom(client, async ({ playerId, roomCode }) => {
+      await this.rooms.setModerator(playerId, roomCode, body?.playerId);
+      await this.realtime.broadcast(roomCode);
+    });
+  }
 
-      client.emit('room:joined', {
-        roomCode: room.code,
-        player: me,
-        players: room.players,
-        gameState: room.gameState,
-        maxPlayers: 12,
-      });
-      
-      client.to(data.roomCode).emit('room:playerJoined', {
-        players: room.players,
-      });
+  @SubscribeMessage('room:transferHost')
+  transferHost(@ConnectedSocket() client: Socket, @MessageBody() body: Body) {
+    return this.inRoom(client, async ({ playerId, roomCode }) => {
+      await this.rooms.transferHost(playerId, roomCode, body?.playerId);
+      await this.realtime.broadcast(roomCode);
+    });
+  }
 
-      if (room.gameState === 'GAME_RUNNING') {
-        client.emit('game:started', {
-          players: room.players.map((p) => ({
-            name: p.name,
-            isAlive: p.isAlive,
-          })),
-        });
+  @SubscribeMessage('lobby:kick')
+  kick(@ConnectedSocket() client: Socket, @MessageBody() body: Body) {
+    return this.inRoom(client, async ({ playerId, roomCode }) => {
+      const kicked = await this.rooms.kick(playerId, roomCode, body?.playerId);
+
+      const kickedSocketId = this.presence.socketOf(kicked.id);
+      const kickedSocket = kickedSocketId
+        ? this.realtime.socket(kickedSocketId)
+        : undefined;
+      if (kickedSocket) {
+        kickedSocket.emit('room:kicked');
+        this.detach(kickedSocket, kicked.id, roomCode);
       }
+      void this.voice.remove(roomCode, kicked.id);
 
-      client.to(room.code).emit('room:playerReconnected', {
-        player: me,
-        players: room.players,
-      });
-    } catch (e: any) {
-      client.emit('room:reconnectError', {
-        message: e.message,
-      });
-    }
+      await this.realtime.broadcast(roomCode);
+    });
   }
 
-  @SubscribeMessage('room:getState')
-  async getState(
-    @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      roomCode: string;
-    },
-  ) {
-    try {
-      const room = await this.roomService.find(data.roomCode);
-
-      client.emit('room:joined', {
-        roomCode: room.code,
-        player: room.players.find((p) => p.socketId === client.id),
-        players: room.players,
-        gameState: room.gameState,
-        maxPlayers: 12,
-      });
-    } catch (e: any) {
-      client.emit('room:error', {
-        message: e.message,
-      });
+  /** Binds the socket to the player and returns what the client must store. */
+  private async enter(client: Socket, player: Player, roomCode: string) {
+    const previous = sessionOf(client);
+    if (previous && previous.playerId !== player.id) {
+      this.detach(client, previous.playerId, previous.roomCode);
+      await this.realtime.broadcast(previous.roomCode);
     }
+
+    const replacedSocketId = this.presence.bind(player.id, client.id);
+    if (replacedSocketId && replacedSocketId !== client.id) {
+      const replaced = this.realtime.socket(replacedSocketId);
+      replaced?.emit('session:replaced');
+      replaced?.disconnect(true);
+    }
+
+    const session: SocketSession = { playerId: player.id, roomCode };
+    client.data = session;
+    await client.join(roomChannel(roomCode));
+    await this.realtime.broadcast(roomCode);
+
+    return { code: roomCode, token: player.token };
   }
 
-  @SubscribeMessage('player:ready')
-  async ready(
-    @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      playerName: string;
-      roomCode: string;
-    },
-  ) {
-    try {
-      const result = await this.roomService.toggleReady(data, client);
-
-      this.server.to(data.roomCode).emit('room:playersUpdated', {
-        players: result.players,
-        allReady: result.allReady,
-      });
-    } catch (e: any) {
-      client.emit('room:error', {
-        message: e.message,
-      });
-    }
+  private detach(client: Socket, playerId: string, roomCode: string) {
+    this.presence.unbind(playerId, client.id);
+    void client.leave(roomChannel(roomCode));
+    client.data = undefined;
   }
 
-  @SubscribeMessage('player:myCard')
-  async myCard(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomCode: string; playerName: string },
+  private inRoom(
+    client: Socket,
+    action: (session: SocketSession) => Promise<void>,
   ) {
-    try {
-      const card = await this.roomService.getPlayerCard(
-        data.roomCode,
-        data.playerName,
-      );
-
-      client.emit('player:cardReceived', {
-        character: card,
-      });
-    } catch (e: any) {
-      client.emit('room:error', {
-        message: e.message,
-      });
-    }
-  }
-
-  @SubscribeMessage('host:getCard')
-  async getCard(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomCode: string; playerName: string },
-  ) {
-    try {
-      const room = await this.roomService.find(data.roomCode);
-      const currentPlayer = room.players.find(
-        (p) => p.name === data.playerName,
-      );
-
-      if (!currentPlayer) throw new Error('Игрок не найден');
-
-      client.emit('host:getCardUp', {
-        playerName: currentPlayer.name,
-        card: currentPlayer.characters,
-      });
-    } catch (e: any) {
-      client.emit('room:error', {
-        message: `Не удалось получить карту: ${e.message}`,
-      });
-    }
-  }
-
-  @SubscribeMessage('host:kick')
-  async kickPlayer(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomCode: string; playerName: string },
-  ) {
-    try {
-      const result = await this.roomService.kick(data);
-
-      this.server.to(data.roomCode).emit('player:kicked', {
-        kickedPlayer: result.kickedPlayer,
-        players: result.room.players,
-      });
-    } catch (e: any) {
-      client.emit('room:error', {
-        message: `Cant kick player: ${e.message}`,
-      });
-    }
-  }
-
-  @SubscribeMessage('player:left')
-  async leave(
-    @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      playerName: string;
-      roomCode: string;
-    },
-  ) {
-    try {
-      const result = await this.roomService.leave(
-        data.playerName,
-        data.roomCode,
-      );
-
-      client.leave(data.roomCode);
-
-      this.server.to(data.roomCode).emit('players:left', {
-        players: result?.room.players ?? [],
-      });
-
-      client.emit('room:left');
-
-      this.logger.log(`${data.playerName} вышел из комнаты`);
-    } catch (e: any) {
-      client.emit('room:error', {
-        message: e.message,
-      });
-    }
+    return inRoom(this.logger, client, (session) =>
+      this.lock.run(session.roomCode, () => action(session)),
+    );
   }
 }
