@@ -1,7 +1,8 @@
 import { Player, Prisma, Room } from '@prisma/client';
 import { CardKey, PlayerCard, isCardKey } from '../deck/card.types';
 import { DEFAULT_SETTINGS } from './room.settings';
-import { buildGameView } from '../game/game.view';
+import { CARD_HINTS } from '../deck/card.hints';
+import { buildGameView, peeksOf } from '../game/game.view';
 import { PublicPlayer, RoomSettings, RoomView } from './room.types';
 
 export type RoomWithPlayers = Room & { players: Player[] };
@@ -15,13 +16,18 @@ export const settingsOf = (room: Room): RoomSettings => {
     mode: room.mode,
     maxPlayers: room.maxPlayers,
     timers: { ...DEFAULT_SETTINGS.timers, ...stored?.timers },
+    actions: { ...DEFAULT_SETTINGS.actions, ...stored?.actions },
   };
 };
 
 /** Inverse of settingsOf(): data for prisma.room.create/update. */
-export const settingsData = ({ timers, ...columns }: RoomSettings) => ({
+export const settingsData = ({
+  timers,
+  actions,
+  ...columns
+}: RoomSettings) => ({
   ...columns,
-  settings: { timers } as unknown as Prisma.InputJsonValue,
+  settings: { timers, actions } as unknown as Prisma.InputJsonValue,
 });
 
 export const cardOf = (player: Player) =>
@@ -51,6 +57,16 @@ export const buildRoomView = (
 ): RoomView => {
   const seesAllCards =
     viewer.role === 'MODERATOR' || room.status === 'FINISHED';
+  const peeks = peeksOf(room, viewer.id);
+
+  /** Values seen privately by the viewer (Проверка досье, Тайное знание). */
+  const knownPart = (p: Player): Partial<PlayerCard> => {
+    const card = cardOf(p);
+    if (!card) return {};
+    return Object.fromEntries(
+      peeks.filter((x) => x.playerId === p.id).map((x) => [x.key, card[x.key]]),
+    );
+  };
 
   const players = [...room.players]
     .sort((a, b) => a.joinedAt.getTime() - b.joinedAt.getTime())
@@ -64,8 +80,25 @@ export const buildRoomView = (
       isAlive: p.isAlive,
       hasLeft: p.hasLeft,
       revealed: revealedPart(p),
+      known: knownPart(p),
       ...(seesAllCards && cardOf(p) ? { card: cardOf(p)! } : {}),
     }));
+
+  // Descriptions only for values the viewer can actually see.
+  const visible = new Set<string>([
+    ...Object.values(cardOf(viewer) ?? {}),
+    ...players.flatMap((p) => [
+      ...Object.values(p.revealed),
+      ...Object.values(p.known ?? {}),
+      ...Object.values(p.card ?? {}),
+    ]),
+  ]);
+  const hints = Object.fromEntries(
+    [...visible].flatMap((value) => {
+      const hint = CARD_HINTS.get(value);
+      return hint ? [[value, hint]] : [];
+    }),
+  );
 
   return {
     code: room.code,
@@ -75,6 +108,7 @@ export const buildRoomView = (
     myCard: cardOf(viewer),
     myRevealed: revealedKeysOf(viewer),
     players,
+    hints,
     game: buildGameView(room, viewer, now),
   };
 };

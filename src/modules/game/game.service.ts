@@ -5,7 +5,7 @@ import {
   OnModuleDestroy,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { randomInt } from 'crypto';
+import { randomInt, randomUUID } from 'crypto';
 
 import { GameError } from '../../common/game-error';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -19,8 +19,9 @@ import { cardOf } from '../room/room.view';
 import { VoiceService } from '../voice/voice.service';
 import { BUNKER_FEATURES, BUNKERS, CATASTROPHES } from './data/scenarios';
 import { GameContext, gameOf } from './game.context';
+import * as actions from './game.actions';
 import * as rules from './game.rules';
-import { GamePhase, GameState } from './game.types';
+import { ActionParams, GamePhase, GameState } from './game.types';
 
 const BUNKER_FEATURE_COUNT = 3;
 /** After a server restart players need time to reconnect. */
@@ -233,6 +234,14 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
       const s = ctx.state;
       const player = this.alivePlayer(ctx, actorId);
 
+      // "Исповедь": the target reveals anything of their choice, any time.
+      if (s.confession?.targetId === player.id) {
+        if (player.revealed.includes(key)) throw new GameError('Уже раскрыто');
+        s.confession = null;
+        rules.revealOwn(ctx, player, key);
+        return;
+      }
+
       if (s.phase !== 'REVEAL')
         throw new GameError('Сейчас не время раскрывать карты');
       if (s.speakerId && s.speakerId !== player.id)
@@ -316,6 +325,60 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
       ctx.touch();
 
       if (ctx.isAuto && rules.everyoneVoted(ctx)) rules.closeVoting(ctx);
+    });
+  }
+
+  /**
+   * Plays the viewer's action card. In a moderated room with approval on,
+   * it waits for the moderator instead of applying at once.
+   */
+  playAction(actorId: string, code: string, body: Body) {
+    const params = this.parseActionParams(body);
+    return this.mutate(code, (ctx) => {
+      const actor = this.alivePlayer(ctx, actorId);
+      const reason = actions.blockedReason(ctx, actor);
+      if (reason) throw new GameError(reason);
+      actions.resolveParams(ctx, actor, params); // validate before queueing
+
+      const needsApproval =
+        !ctx.isAuto &&
+        ctx.settings.actions.approval === 'MODERATOR' &&
+        ctx.room.players.some((p) => p.role === 'MODERATOR' && !p.hasLeft);
+
+      if (needsApproval) {
+        const pending = { id: randomUUID(), playerId: actor.id, params };
+        ctx.state.pendingActions = [...ctx.state.pendingActions!, pending];
+        ctx.log(
+          `${actor.name} хочет сыграть карту действия — ждём ведущего`,
+          'vote',
+        );
+        return;
+      }
+
+      actions.executeAction(ctx, actor, params, this.actionDeps);
+    });
+  }
+
+  modResolveAction(
+    actorId: string,
+    code: string,
+    body: Body,
+    approve: boolean,
+  ) {
+    return this.moderate(actorId, code, (ctx) => {
+      const pending = ctx.state.pendingActions!.find((a) => a.id === body?.id);
+      if (!pending) throw new GameError('Запрос не найден');
+      ctx.state.pendingActions = ctx.state.pendingActions!.filter(
+        (a) => a.id !== pending.id,
+      );
+      const player = ctx.player(pending.playerId);
+
+      if (!approve) {
+        ctx.log(`Ведущий отклонил карту игрока ${player.name}`, 'vote');
+        return;
+      }
+      if (!ctx.isAlivePlayer(player.id)) throw new GameError('Игрок уже выбыл');
+      actions.executeAction(ctx, player, pending.params, this.actionDeps);
     });
   }
 
@@ -468,6 +531,20 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
 
   // ---- internals --------------------------------------------------------
 
+  private readonly actionDeps: actions.ActionDeps = {
+    randomValue: (key, exclude) => this.deck.randomValue(key, exclude),
+  };
+
+  private parseActionParams(body: Body): ActionParams {
+    const id = (value: unknown) =>
+      typeof value === 'string' ? value : undefined;
+    return {
+      targetId: id(body?.targetId),
+      otherId: id(body?.otherId),
+      key: isCardKey(body?.key) ? body.key : undefined,
+    };
+  }
+
   private moderate(
     actorId: string,
     code: string,
@@ -538,7 +615,9 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
     await this.realtime.broadcast(code);
     this.schedule(code, ctx.state, ctx.isAuto && !ctx.finished);
     // Exiled players lose the right to talk, everyone talks after the end.
-    if (ctx.dirtyPlayers.size > 0 || ctx.finished) this.voice.syncLater(code);
+    if (ctx.dirtyPlayers.size > 0 || ctx.finished || ctx.voiceChanged) {
+      this.voice.syncLater(code);
+    }
   }
 
   private schedule(code: string, state: GameState, auto: boolean) {

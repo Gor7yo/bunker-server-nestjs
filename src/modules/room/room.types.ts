@@ -12,6 +12,16 @@ export interface RoomTimers {
   defense: number;
 }
 
+/** When action cards may be played. */
+export type ActionTiming = 'ANYTIME' | 'OWN_TURN';
+/** Moderated mode: cards apply at once or wait for the moderator. */
+export type ActionApproval = 'AUTO' | 'MODERATOR';
+
+export interface ActionRules {
+  timing: ActionTiming;
+  approval: ActionApproval;
+}
+
 export interface RoomSettings {
   title: string;
   /** Listed on the home page; private rooms are joined by code only. */
@@ -20,6 +30,7 @@ export interface RoomSettings {
   /** Max number of players, a moderator does not take a slot. */
   maxPlayers: number;
   timers: RoomTimers;
+  actions: ActionRules;
 }
 
 /** A row in the public rooms list on the home page. */
@@ -42,6 +53,8 @@ export interface PublicPlayer {
   isAlive: boolean;
   hasLeft: boolean;
   revealed: Partial<PlayerCard>;
+  /** Hidden values the viewer saw privately. */
+  known?: Partial<PlayerCard>;
   /** Full card, only present in the moderator's view. */
   card?: PlayerCard;
 }
@@ -55,5 +68,7 @@ export interface RoomView {
   myCard: PlayerCard | null;
   myRevealed: CardKey[];
   players: PublicPlayer[];
+  /** Card value → description, for tooltips. */
+  hints: Record<string, string>;
   game: GameView | null;
 }

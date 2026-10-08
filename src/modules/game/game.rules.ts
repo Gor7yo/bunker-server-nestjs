@@ -119,7 +119,9 @@ export function startVoting(
   s.turnQueue = [];
   s.votes = {};
   s.readyToVote = [];
-  s.candidates = candidates;
+  // "Иммунитет": can't be voted out this round (unless everyone is immune).
+  const votable = candidates.filter((id) => !ctx.isImmune(id));
+  s.candidates = votable.length > 0 ? votable : candidates;
   s.isRevote = isRevote;
   ctx.setPhase('VOTING', seconds);
   ctx.log(isRevote ? 'Переголосование' : 'Голосование началось', 'vote');
@@ -222,6 +224,7 @@ export function nextDefender(ctx: GameContext) {
 export function exilePlayer(ctx: GameContext, player: Player, byLot: boolean) {
   const s = ctx.state;
   ctx.exile(player);
+  passLegacy(ctx, player);
   s.speakerId = null;
   s.lastExiledId = player.id;
   s.exiledByLot = byLot;
@@ -232,6 +235,27 @@ export function exilePlayer(ctx: GameContext, player: Player, byLot: boolean) {
     'exile',
   );
   ctx.setPhase('EXILE', autoSeconds(ctx, EXILE_SECONDS));
+}
+
+/** "Наследие": the exiled player's profession goes to the next player in order. */
+function passLegacy(ctx: GameContext, exiled: Player) {
+  if (!ctx.state.legacy?.includes(exiled.id)) return;
+  ctx.state.legacy = ctx.state.legacy.filter((id) => id !== exiled.id);
+
+  const order = ctx.participants;
+  const start = order.findIndex((p) => p.id === exiled.id);
+  const heir = [...order.slice(start + 1), ...order.slice(0, start)].find(
+    (p) => p.isAlive && !p.hasLeft,
+  );
+  const profession = cardOf(exiled)?.profession;
+  if (!heir || !profession) return;
+
+  ctx.setCardValue(heir, 'profession', profession);
+  ctx.reveal(heir, 'profession');
+  ctx.log(
+    `Наследие: ${heir.name} получает профессию «${profession}»`,
+    'reveal',
+  );
 }
 
 /** AUTO, after the exile screen: next round or the end. */

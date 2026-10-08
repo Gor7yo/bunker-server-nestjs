@@ -1,5 +1,11 @@
 import { GameError } from '../../common/game-error';
-import { GameMode, RoomSettings, RoomTimers } from './room.types';
+import {
+  ActionApproval,
+  ActionTiming,
+  GameMode,
+  RoomSettings,
+  RoomTimers,
+} from './room.types';
 
 export const PLAYER_LIMITS = {
   /** Minimal players to start. Override with MIN_PLAYERS for local testing. */
@@ -29,7 +35,11 @@ export const DEFAULT_SETTINGS: RoomSettings = {
   mode: 'AUTO',
   maxPlayers: 12,
   timers: { reveal: 60, discussion: 180, voting: 30, defense: 45 },
+  actions: { timing: 'ANYTIME', approval: 'AUTO' },
 };
+
+const ACTION_TIMINGS: ActionTiming[] = ['ANYTIME', 'OWN_TURN'];
+const ACTION_APPROVALS: ActionApproval[] = ['AUTO', 'MODERATOR'];
 
 const MODES: GameMode[] = ['AUTO', 'MODERATED'];
 
@@ -59,7 +69,11 @@ export const mergeSettings = (
   if (patch === undefined) return base;
   if (!isObject(patch)) throw new GameError('Некорректные настройки');
 
-  const next: RoomSettings = { ...base, timers: { ...base.timers } };
+  const next: RoomSettings = {
+    ...base,
+    timers: { ...base.timers },
+    actions: { ...base.actions },
+  };
 
   if (patch.title !== undefined) {
     const title =
@@ -106,6 +120,24 @@ export const mergeSettings = (
           TIMER_LABELS[key],
         );
       }
+    }
+  }
+
+  if (patch.actions !== undefined) {
+    if (!isObject(patch.actions))
+      throw new GameError('Некорректные правила карт');
+    const { timing, approval } = patch.actions;
+    if (timing !== undefined) {
+      if (!ACTION_TIMINGS.includes(timing as ActionTiming)) {
+        throw new GameError('Неизвестное правило карт действий');
+      }
+      next.actions.timing = timing as ActionTiming;
+    }
+    if (approval !== undefined) {
+      if (!ACTION_APPROVALS.includes(approval as ActionApproval)) {
+        throw new GameError('Неизвестное правило одобрения карт');
+      }
+      next.actions.approval = approval as ActionApproval;
     }
   }
 

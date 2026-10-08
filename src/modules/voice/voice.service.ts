@@ -46,6 +46,9 @@ export class VoiceService {
   canPublish(room: RoomWithPlayers, player: Player) {
     if (room.status !== 'PLAYING') return true;
     if (player.role === 'MODERATOR') return true;
+    // "Атака на репутацию": silenced until the discussion ends.
+    const silenced = (room.game as { silenced?: string[] } | null)?.silenced;
+    if (silenced?.includes(player.id)) return false;
     return player.isAlive && !player.hasLeft;
   }
 

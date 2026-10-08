@@ -65,7 +65,26 @@ export class GameGateway {
     return this.run(c, (id, code) => this.game.vote(id, code, body));
   }
 
+  @SubscribeMessage('game:playAction')
+  playAction(@ConnectedSocket() c: Socket, @MessageBody() body: Body) {
+    return this.run(c, (id, code) => this.game.playAction(id, code, body));
+  }
+
   // ---- moderator ----
+
+  @SubscribeMessage('mod:approveAction')
+  modApproveAction(@ConnectedSocket() c: Socket, @MessageBody() body: Body) {
+    return this.run(c, (id, code) =>
+      this.game.modResolveAction(id, code, body, true),
+    );
+  }
+
+  @SubscribeMessage('mod:rejectAction')
+  modRejectAction(@ConnectedSocket() c: Socket, @MessageBody() body: Body) {
+    return this.run(c, (id, code) =>
+      this.game.modResolveAction(id, code, body, false),
+    );
+  }
 
   @SubscribeMessage('mod:phase')
   modPhase(@ConnectedSocket() c: Socket, @MessageBody() body: Body) {

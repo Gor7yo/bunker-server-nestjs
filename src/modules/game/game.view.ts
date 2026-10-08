@@ -1,29 +1,39 @@
 import { Player } from '@prisma/client';
 
-import type { RoomWithPlayers } from '../room/room.view';
+import { CARD_HINTS } from '../deck/card.hints';
+import { cardOf, type RoomWithPlayers } from '../room/room.view';
+import { myActionView } from './game.actions';
+import { GameContext } from './game.context';
 import { GameState, GameView } from './game.types';
 
 const LOG_VIEW_LIMIT = 40;
 
-/** Game state for one viewer: votes stay secret until the voting closes. */
+/** Game state for one viewer: votes and peeks stay private. */
 export const buildGameView = (
   room: RoomWithPlayers,
   viewer: Player,
   now: number,
 ): GameView | null => {
-  const state = room.game as unknown as GameState | null;
-  if (!state) return null;
+  const raw = room.game as unknown as GameState | null;
+  if (!raw) return null;
 
+  // Read-only context: normalizes optional fields, online state isn't needed.
+  const ctx = new GameContext(room, structuredClone(raw), () => true);
+  const state = ctx.state;
   const isModerator = viewer.role === 'MODERATOR';
-  const alive = room.players.filter(
-    (p) => p.role === 'PLAYER' && p.isAlive && !p.hasLeft,
-  );
   const requiredKey =
     state.round === 1 &&
     viewer.role === 'PLAYER' &&
     !viewer.revealed.includes('profession')
       ? 'profession'
       : null;
+
+  const pending = state
+    .pendingActions!.filter((a) => isModerator || a.playerId === viewer.id)
+    .map((a) => {
+      const value = cardOf(ctx.player(a.playerId))?.action ?? '';
+      return { ...a, value, description: CARD_HINTS.get(value) ?? null };
+    });
 
   return {
     catastrophe: state.catastrophe,
@@ -46,7 +56,18 @@ export const buildGameView = (
     lastExiledId: state.lastExiledId,
     exiledByLot: state.exiledByLot,
     requiredKey,
-    aliveCount: alive.length,
+    aliveCount: ctx.alive.length,
     log: state.log.slice(-LOG_VIEW_LIMIT),
+    myAction: myActionView(ctx, viewer),
+    silenced: state.silenced!,
+    immune: ctx.alive.filter((p) => ctx.isImmune(p.id)).map((p) => p.id),
+    confession: state.confession ?? null,
+    pendingActions: pending,
   };
+};
+
+/** Characteristics the viewer saw privately, per player id. */
+export const peeksOf = (room: RoomWithPlayers, viewerId: string) => {
+  const state = room.game as unknown as GameState | null;
+  return state?.peeks?.[viewerId] ?? [];
 };

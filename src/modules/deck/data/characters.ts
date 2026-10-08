@@ -14,6 +14,13 @@ export interface IPropertyCategory {
 
 export const PROPERTY_CATEGORIES: IPropertyCategory[] = [
   {
+    category: 'gender',
+    items: [
+      { id: 1001, value: 'Мужчина' },
+      { id: 1002, value: 'Женщина' },
+    ],
+  },
+  {
     category: 'baggage',
     items: [
       { id: 1, value: 'Аптечка' },

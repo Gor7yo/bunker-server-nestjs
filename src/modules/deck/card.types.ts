@@ -1,6 +1,7 @@
 export const CARD_KEYS = [
-  'profession',
+  'gender',
   'age',
+  'profession',
   'health',
   'phobia',
   'hobby',
@@ -17,8 +18,9 @@ export const isCardKey = (value: unknown): value is CardKey =>
   typeof value === 'string' && (CARD_KEYS as readonly string[]).includes(value);
 
 export const CARD_LABELS: Record<CardKey, string> = {
-  profession: 'Профессия',
+  gender: 'Пол',
   age: 'Возраст',
+  profession: 'Профессия',
   health: 'Здоровье',
   phobia: 'Фобия',
   hobby: 'Хобби',

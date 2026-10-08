@@ -1,7 +1,9 @@
 import { GameMode, Player } from '@prisma/client';
 
 import { GameError } from '../../common/game-error';
-import { CARD_KEYS, CardKey } from '../deck/card.types';
+import { randomInt } from 'crypto';
+
+import { CARD_KEYS, CARD_LABELS, CardKey } from '../deck/card.types';
 import { RoomWithPlayers, cardOf, settingsOf } from '../room/room.view';
 import { RoomSettings } from '../room/room.types';
 import { GamePhase, GameState, LogTone } from './game.types';
@@ -23,6 +25,8 @@ export class GameContext {
   readonly dirtyPlayers = new Set<string>();
   changed = false;
   finished = false;
+  /** Who may talk changed (silence) — voice permissions must be synced. */
+  voiceChanged = false;
 
   constructor(
     readonly room: RoomWithPlayers,
@@ -31,6 +35,20 @@ export class GameContext {
   ) {
     this.settings = settingsOf(room);
     this.mode = room.mode;
+
+    // Games started before action cards existed lack these fields.
+    state.usedActions ??= [];
+    state.peeks ??= {};
+    state.silenced ??= [];
+    state.immune ??= {};
+    state.legacy ??= [];
+    state.confession ??= null;
+    state.pendingActions ??= [];
+  }
+
+  /** Can't be voted out in the current round (Иммунитет). */
+  isImmune(playerId: string) {
+    return this.state.immune?.[playerId] === this.state.round;
   }
 
   get isAuto() {
@@ -99,6 +117,8 @@ export class GameContext {
 
   revive(player: Player) {
     player.isAlive = true;
+    // Nothing left to cancel for "Религиозный фанатизм".
+    if (this.state.lastExiledId === player.id) this.state.lastExiledId = null;
     this.markPlayer(player);
   }
 
@@ -116,6 +136,16 @@ export class GameContext {
     this.changed = true;
   }
 
+  /** Out of the current voting: can't be voted for, votes against are dropped. */
+  forgetAsCandidate(playerId: string) {
+    const s = this.state;
+    s.candidates = s.candidates.filter((id) => id !== playerId);
+    s.votes = Object.fromEntries(
+      Object.entries(s.votes).filter(([, target]) => target !== playerId),
+    );
+    this.changed = true;
+  }
+
   private markPlayer(player: Player) {
     this.dirtyPlayers.add(player.id);
     this.changed = true;
@@ -125,6 +155,20 @@ export class GameContext {
 
   /** `seconds = null` — no timer (moderator decides when to move on). */
   setPhase(phase: GamePhase, seconds: number | null) {
+    const previous = this.state.phase;
+
+    // "Атака на репутацию" lasts until the discussion is over.
+    if (
+      previous === 'DISCUSSION' &&
+      phase !== 'DISCUSSION' &&
+      this.state.silenced?.length
+    ) {
+      this.state.silenced = [];
+      this.voiceChanged = true;
+    }
+    // An unanswered "Исповедь" is resolved with a random characteristic.
+    if (this.state.confession) this.resolveConfession();
+
     this.state.phase = phase;
     this.state.phaseEndsAt =
       seconds === null ? null : this.now + seconds * 1000;
@@ -141,5 +185,24 @@ export class GameContext {
 
   touch() {
     this.changed = true;
+  }
+
+  private resolveConfession() {
+    const { targetId } = this.state.confession!;
+    this.state.confession = null;
+    const target = this.alive.find((p) => p.id === targetId);
+    if (!target) return;
+
+    const hidden = this.hiddenKeys(target);
+    const preferred = hidden.filter((key) => key !== 'action');
+    const pool = preferred.length > 0 ? preferred : hidden;
+    if (pool.length === 0) return;
+
+    const key = pool[randomInt(pool.length)];
+    this.reveal(target, key);
+    this.log(
+      `${target.name} не выбрал сам — раскрыто: ${CARD_LABELS[key].toLowerCase()} — ${cardOf(target)?.[key]}`,
+      'reveal',
+    );
   }
 }
