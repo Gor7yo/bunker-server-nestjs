@@ -21,7 +21,7 @@ model Player {
   id         String   @id @default(uuid())
   socketId   String?  @unique
 
-  name       String
+  name       String 
 
   isHost     Boolean @default(false)
   isReady    Boolean @default(false)

@@ -32,13 +32,22 @@ export class RoomGateway implements OnGatewayDisconnect {
     if (!player) return;
 
     try {
-      const result = await this.roomService.leave(player.name, player.roomCode);
+      const result = await this.roomService.setOffline(
+        player.name,
+        player.roomCode,
+        client.id,
+      );
+
+      if (!result) {
+        console.log('⚠️ Старый socket, игнорируем:', client.id);
+        return;
+      }
 
       this.server.to(player.roomCode).emit('players:left', {
-        players: result?.room.players ?? [],
+        players: result.room.players,
       });
 
-      this.logger.log(`${player.name} отключился`);
+      this.logger.log(`${player.name} disconnected`);
     } catch (e) {
       this.logger.error(e);
     }
@@ -59,7 +68,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         host: room.players[0],
       });
 
-      this.logger.log(`Создана комната ${room.code}`);
+      this.logger.log(`Room created ${room.code}`);
     } catch (e: any) {
       client.emit('room:error', {
         message: e.message,
@@ -73,11 +82,19 @@ export class RoomGateway implements OnGatewayDisconnect {
     @MessageBody()
     data: {
       roomCode: string;
-      player: IPlayer;
+      playerName: string;
     },
   ) {
     try {
-      const room = await this.roomService.join(data, client);
+      const player = await this.roomService.findPlayerName(
+        data.playerName,
+        data.roomCode,
+      );
+
+      if (player && !player.isOnline) {
+        return await this.reconnect(client, data);
+      }
+      const room = await this.roomService.join(data, client.id);
 
       client.join(data.roomCode);
 
@@ -97,7 +114,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         players: room.players,
       });
 
-      this.logger.log(`${data.player.name} вошёл в комнату`);
+      this.logger.log(`${data.playerName} connect`);
     } catch (e: any) {
       client.emit('room:error', {
         message: e.message,
@@ -126,7 +143,6 @@ export class RoomGateway implements OnGatewayDisconnect {
 
       this.server.to(data.roomCode).emit('game:started', {
         players: result.players.map((p) => ({
-          id: p.id,
           name: p.name,
           isAlive: p.isAlive,
         })),
@@ -163,17 +179,14 @@ export class RoomGateway implements OnGatewayDisconnect {
         gameState: room.gameState,
         maxPlayers: 12,
       });
-
-      if (me?.characters) {
-        client.emit('player:cardReceived', {
-          character: me.characters,
-        });
-      }
+      
+      client.to(data.roomCode).emit('room:playerJoined', {
+        players: room.players,
+      });
 
       if (room.gameState === 'GAME_RUNNING') {
         client.emit('game:started', {
           players: room.players.map((p) => ({
-            id: p.id,
             name: p.name,
             isAlive: p.isAlive,
           })),
@@ -182,6 +195,7 @@ export class RoomGateway implements OnGatewayDisconnect {
 
       client.to(room.code).emit('room:playerReconnected', {
         player: me,
+        players: room.players,
       });
     } catch (e: any) {
       client.emit('room:reconnectError', {
@@ -228,7 +242,7 @@ export class RoomGateway implements OnGatewayDisconnect {
       const result = await this.roomService.toggleReady(data, client);
 
       this.server.to(data.roomCode).emit('room:playersUpdated', {
-        players: result.room.players,
+        players: result.players,
         allReady: result.allReady,
       });
     } catch (e: any) {
@@ -283,6 +297,25 @@ export class RoomGateway implements OnGatewayDisconnect {
     }
   }
 
+  @SubscribeMessage('host:kick')
+  async kickPlayer(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomCode: string; playerName: string },
+  ) {
+    try {
+      const result = await this.roomService.kick(data);
+
+      this.server.to(data.roomCode).emit('player:kicked', {
+        kickedPlayer: result.kickedPlayer,
+        players: result.room.players,
+      });
+    } catch (e: any) {
+      client.emit('room:error', {
+        message: `Cant kick player: ${e.message}`,
+      });
+    }
+  }
+
   @SubscribeMessage('player:left')
   async leave(
     @ConnectedSocket() client: Socket,
@@ -293,8 +326,10 @@ export class RoomGateway implements OnGatewayDisconnect {
     },
   ) {
     try {
-      console.log(data);
-      const result = await this.roomService.playerLeft(data);
+      const result = await this.roomService.leave(
+        data.playerName,
+        data.roomCode,
+      );
 
       client.leave(data.roomCode);
 
