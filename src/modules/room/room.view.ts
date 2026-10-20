@@ -1,7 +1,7 @@
 import { Player, Prisma, Room } from '@prisma/client';
 import { CardKey, PlayerCard, isCardKey } from '../deck/card.types';
 import { DEFAULT_SETTINGS } from './room.settings';
-import { CARD_HINTS } from '../deck/card.hints';
+import { hintsOf } from '../deck/deck.rules';
 import { buildGameView, peeksOf } from '../game/game.view';
 import { PublicPlayer, RoomSettings, RoomView } from './room.types';
 
@@ -17,17 +17,25 @@ export const settingsOf = (room: Room): RoomSettings => {
     maxPlayers: room.maxPlayers,
     timers: { ...DEFAULT_SETTINGS.timers, ...stored?.timers },
     actions: { ...DEFAULT_SETTINGS.actions, ...stored?.actions },
+    seats: stored?.seats ?? null,
+    cards: { ...DEFAULT_SETTINGS.cards, ...stored?.cards },
+    scenario: { ...DEFAULT_SETTINGS.scenario, ...stored?.scenario },
   };
 };
 
 /** Inverse of settingsOf(): data for prisma.room.create/update. */
 export const settingsData = ({
-  timers,
-  actions,
-  ...columns
+  title,
+  isPublic,
+  mode,
+  maxPlayers,
+  ...rest
 }: RoomSettings) => ({
-  ...columns,
-  settings: { timers, actions } as unknown as Prisma.InputJsonValue,
+  title,
+  isPublic,
+  mode,
+  maxPlayers,
+  settings: rest as unknown as Prisma.InputJsonValue,
 });
 
 export const cardOf = (player: Player) =>
@@ -55,6 +63,8 @@ export const buildRoomView = (
   isOnline: (playerId: string) => boolean,
   now: number,
 ): RoomView => {
+  const settings = settingsOf(room);
+  const cardHints = hintsOf(settings.cards);
   const seesAllCards =
     viewer.role === 'MODERATOR' || room.status === 'FINISHED';
   const peeks = peeksOf(room, viewer.id);
@@ -95,7 +105,7 @@ export const buildRoomView = (
   ]);
   const hints = Object.fromEntries(
     [...visible].flatMap((value) => {
-      const hint = CARD_HINTS.get(value);
+      const hint = cardHints.get(value);
       return hint ? [[value, hint]] : [];
     }),
   );
@@ -103,7 +113,7 @@ export const buildRoomView = (
   return {
     code: room.code,
     status: room.status,
-    settings: settingsOf(room),
+    settings,
     meId: viewer.id,
     myCard: cardOf(viewer),
     myRevealed: revealedKeysOf(viewer),

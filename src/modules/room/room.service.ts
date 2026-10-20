@@ -143,7 +143,16 @@ export class RoomService {
 
   async create(rawName: unknown, settingsPatch: unknown) {
     const name = normalizeName(rawName);
-    const settings = mergeSettings(DEFAULT_SETTINGS, settingsPatch);
+    // A blank title means "default" — it's filled in below.
+    const patch =
+      typeof settingsPatch === 'object' &&
+      settingsPatch !== null &&
+      'title' in settingsPatch &&
+      typeof settingsPatch.title === 'string' &&
+      !settingsPatch.title.trim()
+        ? { ...settingsPatch, title: undefined }
+        : settingsPatch;
+    const settings = mergeSettings(DEFAULT_SETTINGS, patch);
     if (!settings.title) {
       settings.title = `Комната ${name}`.slice(0, TITLE_MAX_LENGTH);
     }
@@ -351,6 +360,12 @@ export class RoomService {
 
     if (players.length < PLAYER_LIMITS.min) {
       throw new GameError(`Нужно минимум ${PLAYER_LIMITS.min} игрока`);
+    }
+
+    if (settings.seats !== null && settings.seats >= players.length) {
+      throw new GameError(
+        `Мест в бункере (${settings.seats}) должно быть меньше, чем игроков (${players.length})`,
+      );
     }
 
     if (

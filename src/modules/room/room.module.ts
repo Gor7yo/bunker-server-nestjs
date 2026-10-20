@@ -8,13 +8,14 @@ import { RoomLock } from './room-lock.service';
 import { RoomGateway } from './room.gateway';
 import { RoomService } from './room.service';
 import { RoomsController } from './rooms.controller';
+import { CatalogController } from './catalog.controller';
 import { VoiceGateway } from '../voice/voice.gateway';
 import { VoiceService } from '../voice/voice.service';
 
 /** Rooms, lobby and the game share presence, the room lock and broadcasting. */
 @Module({
   imports: [DeckModule],
-  controllers: [RoomsController],
+  controllers: [RoomsController, CatalogController],
   providers: [
     RoomService,
     PresenceService,

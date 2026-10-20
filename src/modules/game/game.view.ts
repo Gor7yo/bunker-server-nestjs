@@ -1,6 +1,6 @@
 import { Player } from '@prisma/client';
 
-import { CARD_HINTS } from '../deck/card.hints';
+import { hintsOf } from '../deck/deck.rules';
 import { cardOf, type RoomWithPlayers } from '../room/room.view';
 import { myActionView } from './game.actions';
 import { GameContext } from './game.context';
@@ -21,18 +21,14 @@ export const buildGameView = (
   const ctx = new GameContext(room, structuredClone(raw), () => true);
   const state = ctx.state;
   const isModerator = viewer.role === 'MODERATOR';
-  const requiredKey =
-    state.round === 1 &&
-    viewer.role === 'PLAYER' &&
-    !viewer.revealed.includes('profession')
-      ? 'profession'
-      : null;
+  const requiredKey = viewer.role === 'PLAYER' ? ctx.requiredKey(viewer) : null;
+  const hints = hintsOf(ctx.settings.cards);
 
   const pending = state
     .pendingActions!.filter((a) => isModerator || a.playerId === viewer.id)
     .map((a) => {
       const value = cardOf(ctx.player(a.playerId))?.action ?? '';
-      return { ...a, value, description: CARD_HINTS.get(value) ?? null };
+      return { ...a, value, description: hints.get(value) ?? null };
     });
 
   return {

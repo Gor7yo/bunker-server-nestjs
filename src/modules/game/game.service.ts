@@ -15,7 +15,8 @@ import { PresenceService } from '../room/presence.service';
 import { RealtimeService } from '../room/realtime.service';
 import { RoomLock } from '../room/room-lock.service';
 import { RoomService } from '../room/room.service';
-import { cardOf } from '../room/room.view';
+import { cardOf, settingsOf } from '../room/room.view';
+import type { ScenarioRules } from '../room/room.types';
 import { VoiceService } from '../voice/voice.service';
 import { BUNKER_FEATURES, BUNKERS, CATASTROPHES } from './data/scenarios';
 import { GameContext, gameOf } from './game.context';
@@ -41,6 +42,25 @@ const pickMany = <T>(items: readonly T[], count: number): T[] => {
   }
   return result;
 };
+
+/** Catastrophe and bunker for a new game, as the host set them up. */
+const resolveScenario = ({ catastrophe, bunker }: ScenarioRules) => ({
+  catastrophe:
+    catastrophe.kind === 'CUSTOM'
+      ? { id: 'custom', ...catastrophe.value }
+      : (CATASTROPHES.find(
+          (c) => catastrophe.kind === 'PRESET' && c.id === catastrophe.id,
+        ) ?? pick(CATASTROPHES)),
+  bunker:
+    bunker.kind === 'CUSTOM'
+      ? { id: 'custom', ...bunker.value }
+      : {
+          ...(BUNKERS.find(
+            (b) => bunker.kind === 'PRESET' && b.id === bunker.id,
+          ) ?? pick(BUNKERS)),
+          features: pickMany(BUNKER_FEATURES, BUNKER_FEATURE_COUNT),
+        },
+});
 
 const parseKey = (value: unknown): CardKey => {
   if (!isCardKey(value)) throw new GameError('Неизвестная характеристика');
@@ -108,17 +128,13 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
   start(actorId: string, code: string) {
     return this.lock.run(code, async () => {
       const { room, players } = await this.rooms.assertCanStart(actorId, code);
-      const cards = this.deck.deal(players.length);
-      const bunker = pick(BUNKERS);
+      const settings = settingsOf(room);
+      const cards = this.deck.deal(players.length, settings.cards);
 
       const state: GameState = {
         seq: 0,
-        catastrophe: pick(CATASTROPHES),
-        bunker: {
-          ...bunker,
-          features: pickMany(BUNKER_FEATURES, BUNKER_FEATURE_COUNT),
-        },
-        seats: Math.max(1, Math.floor(players.length / 2)),
+        ...resolveScenario(settings.scenario),
+        seats: settings.seats ?? Math.max(1, Math.floor(players.length / 2)),
         round: 0,
         phase: 'INTRO',
         phaseEndsAt:
@@ -495,7 +511,11 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
       const used = ctx.participants
         .map((p) => cardOf(p)?.[key])
         .filter(Boolean) as string[];
-      ctx.setCardValue(player, key, this.deck.randomValue(key, used));
+      ctx.setCardValue(
+        player,
+        key,
+        this.deck.randomValue(ctx.settings.cards, key, used),
+      );
       const visible = player.revealed.includes(key);
       ctx.log(
         `Ведущий заменил у ${player.name}: ${CARD_LABELS[key].toLowerCase()}` +
@@ -511,8 +531,8 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
       const a = this.cardHolder(ctx, body?.playerId);
       const b = this.cardHolder(ctx, body?.otherId);
       if (a.id === b.id) throw new GameError('Выберите двух разных игроков');
-      const valueA = cardOf(a)![key];
-      ctx.setCardValue(a, key, cardOf(b)![key]);
+      const valueA = cardOf(a)![key]!;
+      ctx.setCardValue(a, key, cardOf(b)![key]!);
       ctx.setCardValue(b, key, valueA);
       ctx.log(
         `Ведущий поменял «${CARD_LABELS[key]}» у ${a.name} и ${b.name}`,
@@ -532,7 +552,8 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
   // ---- internals --------------------------------------------------------
 
   private readonly actionDeps: actions.ActionDeps = {
-    randomValue: (key, exclude) => this.deck.randomValue(key, exclude),
+    randomValue: (rules, key, exclude) =>
+      this.deck.randomValue(rules, key, exclude),
   };
 
   private parseActionParams(body: Body): ActionParams {

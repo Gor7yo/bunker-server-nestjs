@@ -5,19 +5,20 @@ import { GameError } from '../../common/game-error';
 import { CARD_HINTS } from '../deck/card.hints';
 import { CARD_KEYS, CARD_LABELS, CardKey, isCardKey } from '../deck/card.types';
 import { cardOf } from '../room/room.view';
+import type { CardRules } from '../room/room.types';
 import { GameContext } from './game.context';
 import { ActionParams, MyActionView } from './game.types';
 
 /** Randomness and the deck, injected by GameService. */
 export interface ActionDeps {
-  randomValue: (key: CardKey, exclude: string[]) => string;
+  randomValue: (rules: CardRules, key: CardKey, exclude: string[]) => string;
 }
 
 type Target = MyActionView['target'];
 
 interface ActionSpec {
   target: Target;
-  /** Allowed characteristics for 'playerKey'. */
+  /** Allowed characteristics for 'playerKey' (if they are in play). */
   keys?: CardKey[];
   allowSelf?: boolean;
   /** Overrides the room timing rule: the card only makes sense in this phase. */
@@ -53,7 +54,11 @@ function redraw(
   const used = ctx.participants
     .map((p) => cardOf(p)?.[key])
     .filter(Boolean) as string[];
-  ctx.setCardValue(player, key, deps.randomValue(key, used));
+  ctx.setCardValue(
+    player,
+    key,
+    deps.randomValue(ctx.settings.cards, key, used),
+  );
   if (player.revealed.includes(key)) {
     ctx.log(
       `${player.name}: новое значение «${label(key)}» — ${cardOf(player)![key]}`,
@@ -63,8 +68,8 @@ function redraw(
 }
 
 function swapValue(ctx: GameContext, a: Player, b: Player, key: CardKey) {
-  const valueA = cardOf(a)![key];
-  ctx.setCardValue(a, key, cardOf(b)![key]);
+  const valueA = cardOf(a)![key]!;
+  ctx.setCardValue(a, key, cardOf(b)![key]!);
   ctx.setCardValue(b, key, valueA);
 }
 
@@ -229,13 +234,17 @@ const SPECS: Record<string, ActionSpec> = {
     run(ctx, _actor, { target }, deps) {
       ctx.setCardValue(target!, 'health', HEALTHY);
       ctx.log(`${target!.name} вылечен`, 'reveal');
-      if (randomInt(2) === 0) {
+      if (ctx.keys.includes('phobia') && randomInt(2) === 0) {
         redraw(ctx, target!, 'phobia', deps);
         ctx.log(`Побочный эффект: у ${target!.name} новая фобия`, 'reveal');
       }
     },
   },
 };
+
+/** Characteristics the card may target in this room. */
+const allowedKeys = (ctx: GameContext, spec: ActionSpec): CardKey[] =>
+  (spec.keys ?? CARD_KEYS).filter((key) => ctx.keys.includes(key));
 
 function peek(ctx: GameContext, actor: Player, { target, key }: Resolved) {
   if (target!.revealed.includes(key!))
@@ -308,7 +317,7 @@ export function resolveParams(
     case 'playerKey': {
       if (
         !isCardKey(params.key) ||
-        !(spec.keys ?? CARD_KEYS).includes(params.key)
+        !allowedKeys(ctx, spec).includes(params.key)
       ) {
         throw new GameError('Выберите характеристику');
       }
@@ -360,7 +369,7 @@ export function myActionView(
     value,
     description: CARD_HINTS.get(value) ?? null,
     target: spec.target,
-    keys: spec.keys ?? [],
+    keys: spec.target === 'playerKey' ? allowedKeys(ctx, spec) : [],
     allowSelf: spec.allowSelf ?? false,
     used: ctx.state.usedActions!.includes(viewer.id),
     pending: ctx.state.pendingActions!.some((a) => a.playerId === viewer.id),

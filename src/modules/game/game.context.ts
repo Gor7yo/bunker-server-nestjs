@@ -3,7 +3,8 @@ import { GameMode, Player } from '@prisma/client';
 import { GameError } from '../../common/game-error';
 import { randomInt } from 'crypto';
 
-import { CARD_KEYS, CARD_LABELS, CardKey } from '../deck/card.types';
+import { CARD_LABELS, CardKey } from '../deck/card.types';
+import { activeKeys } from '../deck/deck.rules';
 import { RoomWithPlayers, cardOf, settingsOf } from '../room/room.view';
 import { RoomSettings } from '../room/room.types';
 import { GamePhase, GameState, LogTone } from './game.types';
@@ -20,6 +21,8 @@ export const gameOf = (room: { game: unknown }) =>
 export class GameContext {
   readonly now = Date.now();
   readonly settings: RoomSettings;
+  /** Characteristics in play (the host can leave some out). */
+  readonly keys: CardKey[];
   mode: GameMode;
   /** Player ids whose isAlive / revealed / card changed. */
   readonly dirtyPlayers = new Set<string>();
@@ -34,6 +37,7 @@ export class GameContext {
     readonly isOnline: (playerId: string) => boolean,
   ) {
     this.settings = settingsOf(room);
+    this.keys = activeKeys(this.settings.cards);
     this.mode = room.mode;
 
     // Games started before action cards existed lack these fields.
@@ -79,28 +83,42 @@ export class GameContext {
   }
 
   hiddenKeys(player: Player): CardKey[] {
-    return CARD_KEYS.filter((key) => !player.revealed.includes(key));
+    return this.keys.filter((key) => !player.revealed.includes(key));
   }
 
-  /** Round 1 starts with the profession. */
+  /** Round 1 starts with the profession (if it's in play). */
   requiredKey(player: Player): CardKey | null {
-    return this.state.round === 1 && !player.revealed.includes('profession')
+    return this.state.round === 1 &&
+      this.keys.includes('profession') &&
+      !player.revealed.includes('profession')
       ? 'profession'
       : null;
   }
 
+  /** Disabled characteristics aren't on the cards at all. */
+  assertInPlay(key: CardKey) {
+    if (!this.keys.includes(key)) {
+      throw new GameError(
+        `Характеристика «${CARD_LABELS[key]}» не участвует в игре`,
+      );
+    }
+  }
+
   reveal(player: Player, key: CardKey) {
+    this.assertInPlay(key);
     if (player.revealed.includes(key)) return;
     player.revealed = [...player.revealed, key];
     this.markPlayer(player);
   }
 
   hide(player: Player, key: CardKey) {
+    this.assertInPlay(key);
     player.revealed = player.revealed.filter((k) => k !== key);
     this.markPlayer(player);
   }
 
   setCardValue(player: Player, key: CardKey, value: string) {
+    this.assertInPlay(key);
     const card = cardOf(player);
     if (!card) throw new GameError('У игрока нет карты');
     player.card = { ...card, [key]: value };
@@ -110,7 +128,7 @@ export class GameContext {
   /** Exiled players lose their seat and show the whole card. */
   exile(player: Player) {
     player.isAlive = false;
-    player.revealed = [...CARD_KEYS];
+    player.revealed = [...this.keys];
     this.markPlayer(player);
     this.forget(player.id);
   }

@@ -1,6 +1,7 @@
 import { PlayerRole, RoomStatus } from '@prisma/client';
 import { CardKey, PlayerCard } from '../deck/card.types';
 import type { GameView } from '../game/game.types';
+import type { Bunker, Catastrophe } from '../game/data/scenarios';
 
 export type GameMode = 'AUTO' | 'MODERATED';
 
@@ -22,6 +23,43 @@ export interface ActionRules {
   approval: ActionApproval;
 }
 
+/** A custom characteristic value. */
+export interface CardItem {
+  value: string;
+  /** Shown as a tooltip, like the built-in illness/phobia descriptions. */
+  description?: string;
+}
+
+/** Custom values of one characteristic. */
+export interface CustomDeck {
+  /** true — only these values; false — added to the built-in ones. */
+  replace: boolean;
+  items: CardItem[];
+}
+
+export interface CardRules {
+  /** Characteristics left out of the game entirely. */
+  disabled: CardKey[];
+  /** Action cards (by name) removed from the deck. */
+  disabledActions: string[];
+  /** Action cards have mechanics, so they can't be custom. */
+  custom: Partial<Record<Exclude<CardKey, 'action'>, CustomDeck>>;
+}
+
+export type CatastropheText = Omit<Catastrophe, 'id'>;
+export type BunkerText = Omit<Bunker, 'id'>;
+
+/** Random built-in, a specific built-in, or the host's own text. */
+export type ScenarioChoice<T> =
+  | { kind: 'RANDOM' }
+  | { kind: 'PRESET'; id: string }
+  | { kind: 'CUSTOM'; value: T };
+
+export interface ScenarioRules {
+  catastrophe: ScenarioChoice<CatastropheText>;
+  bunker: ScenarioChoice<BunkerText>;
+}
+
 export interface RoomSettings {
   title: string;
   /** Listed on the home page; private rooms are joined by code only. */
@@ -31,6 +69,10 @@ export interface RoomSettings {
   maxPlayers: number;
   timers: RoomTimers;
   actions: ActionRules;
+  /** Bunker seats; null — half of the players, rounded down. */
+  seats: number | null;
+  cards: CardRules;
+  scenario: ScenarioRules;
 }
 
 /** A row in the public rooms list on the home page. */

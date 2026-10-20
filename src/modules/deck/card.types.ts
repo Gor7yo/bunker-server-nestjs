@@ -12,7 +12,8 @@ export const CARD_KEYS = [
 
 export type CardKey = (typeof CARD_KEYS)[number];
 
-export type PlayerCard = Record<CardKey, string>;
+/** Disabled characteristics are absent. */
+export type PlayerCard = Partial<Record<CardKey, string>>;
 
 export const isCardKey = (value: unknown): value is CardKey =>
   typeof value === 'string' && (CARD_KEYS as readonly string[]).includes(value);
