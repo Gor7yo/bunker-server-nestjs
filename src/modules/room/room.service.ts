@@ -3,6 +3,7 @@ import { Player, Prisma } from '@prisma/client';
 import { randomBytes, randomInt } from 'crypto';
 
 import { GameError } from '../../common/game-error';
+import { PLAYERS, plural } from '../../common/plural';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PresenceService } from './presence.service';
 import {
@@ -285,7 +286,7 @@ export class RoomService {
 
     if (playerCount > next.maxPlayers) {
       throw new GameError(
-        `В комнате уже ${playerCount} игроков — лимит не может быть меньше`,
+        `В комнате уже ${playerCount} ${plural(playerCount, PLAYERS)} — лимит не может быть меньше`,
       );
     }
 
@@ -359,7 +360,9 @@ export class RoomService {
     const players = activePlayers(room);
 
     if (players.length < PLAYER_LIMITS.min) {
-      throw new GameError(`Нужно минимум ${PLAYER_LIMITS.min} игрока`);
+      throw new GameError(
+        `Нужно минимум ${PLAYER_LIMITS.min} ${plural(PLAYER_LIMITS.min, PLAYERS)}`,
+      );
     }
 
     if (settings.seats !== null && settings.seats >= players.length) {

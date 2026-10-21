@@ -229,7 +229,7 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
       player.isAlive = false;
       ctx.dirtyPlayers.add(player.id);
       ctx.forget(player.id);
-      ctx.log(`${player.name} покинул игру`, 'exile');
+      ctx.log(`${player.name} выходит из игры`, 'exile');
 
       if (!ctx.isAuto || s.phase === 'FINISHED') return;
       if (ctx.alive.length <= s.seats) return rules.finishGame(ctx);
@@ -438,6 +438,8 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
       }
       const player = this.alivePlayer(ctx, body.playerId);
       s.speakerId = player.id;
+      // The queue is "who hasn't spoken yet" in moderated games.
+      s.turnQueue = s.turnQueue.filter((id) => id !== player.id);
       s.revealedThisTurn = false;
       s.phaseEndsAt = seconds === null ? null : ctx.now + seconds * 1000;
       ctx.log(`Слово: ${player.name}`);

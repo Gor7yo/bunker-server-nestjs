@@ -231,7 +231,7 @@ export function exilePlayer(ctx: GameContext, player: Player, byLot: boolean) {
   ctx.log(
     byLot
       ? `${player.name} покидает бункер по жребию`
-      : `${player.name} изгнан из бункера`,
+      : `${player.name}: изгнание из бункера`,
     'exile',
   );
   ctx.setPhase('EXILE', autoSeconds(ctx, EXILE_SECONDS));

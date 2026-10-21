@@ -147,7 +147,7 @@ const SPECS: Record<string, ActionSpec> = {
     target: 'none',
     run(ctx, actor) {
       ctx.setCardValue(actor, 'phobia', NO_PHOBIA);
-      ctx.log(`${actor.name} избавился от фобии`, 'reveal');
+      ctx.log(`${actor.name}: фобия исчезла`, 'reveal');
     },
   },
   'Сброс здоровья': {
@@ -170,7 +170,7 @@ const SPECS: Record<string, ActionSpec> = {
       const s = ctx.state;
       s.immune = { ...s.immune, [actor.id]: s.round };
       ctx.forgetAsCandidate(actor.id);
-      ctx.log(`${actor.name} неприкосновенен до конца раунда`, 'vote');
+      ctx.log(`${actor.name}: иммунитет до конца раунда`, 'vote');
     },
   },
   Перезапуск: {
@@ -196,7 +196,7 @@ const SPECS: Record<string, ActionSpec> = {
         throw new GameError('У игрока всё уже раскрыто');
       ctx.state.confession = { targetId: target!.id, byId: actor.id };
       ctx.log(
-        `${target!.name} должен раскрыть характеристику на свой выбор`,
+        `${target!.name}: исповедь — раскрыть характеристику на свой выбор`,
         'reveal',
       );
     },
@@ -225,7 +225,7 @@ const SPECS: Record<string, ActionSpec> = {
       const s = ctx.state;
       const exiled = ctx.player(s.lastExiledId);
       ctx.revive(exiled);
-      ctx.log(`Пророк ${actor.name} отменил изгнание ${exiled.name}`, 'vote');
+      ctx.log(`Пророк ${actor.name}: изгнание ${exiled.name} отменено`, 'vote');
     },
   },
   'Экспериментальное лечение': {
@@ -233,7 +233,7 @@ const SPECS: Record<string, ActionSpec> = {
     allowSelf: true,
     run(ctx, _actor, { target }, deps) {
       ctx.setCardValue(target!, 'health', HEALTHY);
-      ctx.log(`${target!.name} вылечен`, 'reveal');
+      ctx.log(`${target!.name}: полное исцеление`, 'reveal');
       if (ctx.keys.includes('phobia') && randomInt(2) === 0) {
         redraw(ctx, target!, 'phobia', deps);
         ctx.log(`Побочный эффект: у ${target!.name} новая фобия`, 'reveal');
@@ -255,7 +255,7 @@ function peek(ctx: GameContext, actor: Player, { target, key }: Resolved) {
     { playerId: target!.id, key: key! },
   ];
   ctx.log(
-    `${actor.name} тайно узнал «${label(key!)}» у ${target!.name}`,
+    `${actor.name} тайно смотрит «${label(key!)}» у ${target!.name}`,
     'info',
   );
 }
