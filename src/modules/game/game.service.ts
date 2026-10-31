@@ -23,6 +23,7 @@ import { GameContext, gameOf } from './game.context';
 import * as actions from './game.actions';
 import * as rules from './game.rules';
 import { ActionParams, GamePhase, GameState } from './game.types';
+import { logError } from '../../monitoring';
 
 const BUNKER_FEATURE_COUNT = 3;
 /** After a server restart players need time to reconnect. */
@@ -114,7 +115,7 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
           s.phaseEndsAt = Math.max(s.phaseEndsAt, ctx.now + RESUME_GRACE_MS);
           ctx.touch();
         }
-      }).catch((e: unknown) => this.logger.error(e));
+      }).catch((e: unknown) => logError(this.logger, e));
     }
   }
 
@@ -658,7 +659,7 @@ export class GameService implements OnApplicationBootstrap, OnModuleDestroy {
           if (ctx.state.seq !== seq || !ctx.isAuto) return;
           rules.onPhaseTimeout(ctx);
         }).catch((e: unknown) => {
-          if (!(e instanceof GameError)) this.logger.error(e);
+          if (!(e instanceof GameError)) logError(this.logger, e);
         });
       }, delay),
     );

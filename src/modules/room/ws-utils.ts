@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import { Socket } from 'socket.io';
 
 import { GameError, WsResult } from '../../common/game-error';
+import { logError } from '../../monitoring';
 
 export interface SocketSession {
   playerId: string;
@@ -26,7 +27,7 @@ export async function handleWs<T>(
     return { ok: true, data: await action() };
   } catch (e) {
     if (e instanceof GameError) return { ok: false, error: e.message };
-    logger.error(e);
+    logError(logger, e);
     return { ok: false, error: 'Ошибка сервера, попробуйте ещё раз' };
   }
 }

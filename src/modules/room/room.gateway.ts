@@ -17,8 +17,10 @@ import { PresenceService } from './presence.service';
 import { PUBLIC_ROOMS_CHANNEL, RealtimeService } from './realtime.service';
 import { RoomLock } from './room-lock.service';
 import { RoomService, normalizeCode } from './room.service';
+import { applyRateLimit } from './ws-rate-limit';
 import { handleWs, inRoom, roomChannel, sessionOf } from './ws-utils';
 import type { Body, SocketSession } from './ws-utils';
+import { logError } from '../../monitoring';
 
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -44,6 +46,10 @@ export class RoomGateway
 
   afterInit(server: Namespace) {
     this.realtime.attach(server);
+    server.use((socket, next) => {
+      applyRateLimit(socket);
+      next();
+    });
   }
 
   onModuleInit() {
@@ -55,7 +61,7 @@ export class RoomGateway
           this.logger.log(`Deleted ${count} abandoned room(s)`);
           this.realtime.schedulePublicRooms();
         })
-        .catch((e: unknown) => this.logger.error(e));
+        .catch((e: unknown) => logError(this.logger, e));
     }, CLEANUP_INTERVAL_MS);
   }
 

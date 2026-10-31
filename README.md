@@ -19,6 +19,7 @@ Client: [Bunker-frontend-react](https://github.com/Gor7yo/Bunker-frontend-react)
   - Players join with a secret token and keep their seat when they reconnect.
   - Running timers are restored after a server restart.
   - Abandoned rooms are cleaned up automatically.
+- **Abuse protection.** Socket events and HTTP requests are rate-limited, with stricter limits per IP for creating and joining rooms.
 - **Voice and video.** The server issues LiveKit tokens. Speaking rights follow the game state, so exiled players can only listen. The moderator can mute a player.
 
 ## Tech stack
@@ -46,6 +47,7 @@ pnpm start:dev                  # http://localhost:3000
 | `MIN_PLAYERS` | Minimum number of players needed to start a game. Set it to `2` for local testing. | `4` |
 | `LIVEKIT_URL` | Your LiveKit project URL (`wss://…`) | — |
 | `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | LiveKit credentials | — |
+| `SENTRY_DSN` | Sentry project DSN for error reports. Leave empty to turn reporting off. | — |
 
 Keep secrets in **`.env.local`**. It is git-ignored and loaded before `.env`. Without LiveKit credentials the game still works, just without voice.
 
@@ -58,6 +60,7 @@ To get LiveKit credentials, create a free project at [cloud.livekit.io](https://
 | `pnpm start:dev` | Run with hot reload |
 | `pnpm build` / `pnpm start:prod` | Build and run the compiled server |
 | `pnpm lint` | ESLint with autofix |
+| `pnpm test` | Unit tests: game engine, action cards, settings, deck, rate limiter |
 | `pnpm prisma migrate dev --name <name>` | Create a migration after changing the schema |
 
 ## Project structure

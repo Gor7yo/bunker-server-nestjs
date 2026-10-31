@@ -28,6 +28,9 @@ export const CLIENT_ORIGIN: string[] = (
   .map(normalizeOrigin)
   .filter((origin) => origin !== 'https://');
 
+/** Sentry project DSN; empty — error reporting is off. */
+export const SENTRY_DSN = process.env.SENTRY_DSN ?? '';
+
 export const LIVEKIT = {
   url: process.env.LIVEKIT_URL ?? '',
   apiKey: process.env.LIVEKIT_API_KEY ?? '',
